@@ -1,0 +1,146 @@
+#!/bin/bash
+# shive-restore – browse staging and restore workflows.
+#   stage    --snapshot ds@snap [--target spec]            -> JSON {path,staged_id,remote}
+#   unstage  --id <id> | --all | --all-expired
+#   file     --snapshot ds@snap [--target spec] --path <rel> --dest <abs> --mode copy|overwrite [--yes] [--dry-run]
+#   dataset  --snapshot ds@snap --method rsync|rollback [--yes] [--dry-run]
+#   dr       --target spec --snapshot tds@snap --to <new-ds> [--recursive] [--dry-run]
+# Source datasets are browsed straight from .zfs/snapshot (read-only, no clone).
+# Unmounted datasets (backup targets) are cloned read-only to <pool>/shive-restore/<id>.
+set -uo pipefail
+source "$(dirname "$0")/lib/common.sh"
+load_cfg
+CMD="${1:-}"; shift || true
+SNAPSPEC=""; TARGET="local"; REL=""; DEST=""; MODE="copy"; YES=0; METHOD="rsync"; ID=""; ALL=0; EXPIRED=0; TO=""; REC=0
+while [ $# -gt 0 ]; do case "$1" in
+  --snapshot) SNAPSPEC="$2"; shift 2;; --target) TARGET="$2"; shift 2;; --path) REL="$2"; shift 2;;
+  --dest) DEST="$2"; shift 2;; --mode) MODE="$2"; shift 2;; --yes) YES=1; shift;; --method) METHOD="$2"; shift 2;;
+  --id) ID="$2"; shift 2;; --all) ALL=1; shift;; --all-expired) EXPIRED=1; shift;; --to) TO="$2"; shift 2;;
+  --recursive) REC=1; shift;; --dry-run) DRY_RUN=1; shift;; *) die "unknown option $1";; esac; done
+export DRY_RUN
+# shellcheck disable=SC2034  # read by log()/notify() in common.sh
+SCHED="restore"
+# shellcheck disable=SC2034
+LOG_FILE="$LOG_DIR/restore.log"
+
+# target may be "local" (=local dataset of the snapshot) or an ssh:// spec
+set_target() { if [ "$TARGET" = local ]; then t_parse "local:${SNAPSPEC%@*}"; else t_parse "$TARGET"; fi; }
+sanitize() { echo "$1" | tr -c 'A-Za-z0-9_\n' '-' | sed 's/-\+/-/g'; }
+
+# ---- stage -------------------------------------------------------------------
+cmd_stage() {
+  [ -n "$SNAPSPEC" ] || die "--snapshot required"
+  set_target; local ds="${SNAPSPEC%@*}" snap="${SNAPSPEC#*@}"
+  local mounted mp; read -r mounted mp < <(t_exec zfs get -H -o value mounted,mountpoint "$ds" | tr '\n' ' ')
+  if [ "$mounted" = yes ] && [ "$mp" != legacy ] && [ "$mp" != none ]; then
+    jq -nc --arg p "$mp/.zfs/snapshot/$snap" --arg r "$T_TYPE" '{path:$p,staged_id:null,remote:($r=="ssh")}'; return 0
+  fi
+  local id; id="$(sanitize "$ds")-$(date +%s)"
+  local pool; pool=$(pool_of "$ds"); local clone="$pool/shive-restore/$id" cmp="/mnt/shive/restore/$id"
+  [ "$T_TYPE" = ssh ] && cmp="/tmp/shive-restore/$id"
+  t_dataset_exists "$pool/shive-restore" || t_exec zfs create -o canmount=off -o mountpoint=none "$pool/shive-restore" || die "cannot create staging parent"
+  t_exec zfs clone -o readonly=on -o mountpoint="$cmp" "$SNAPSPEC" "$clone" || die "clone failed"
+  jq -n --arg id "$id" --arg c "$clone" --arg t "$TARGET" --arg p "$cmp" --arg ts "$(date +%s)" \
+    '{id:$id,clone:$c,target:$t,path:$p,created:($ts|tonumber)}' > "$SHIVE_VAR/restore/$id.json"
+  log "staged $SNAPSPEC as $clone at $cmp"
+  jq -nc --arg p "$cmp" --arg id "$id" --arg r "$T_TYPE" '{path:$p,staged_id:$id,remote:($r=="ssh")}'
+}
+
+# ---- unstage -----------------------------------------------------------------
+unstage_one() {
+  local f="$1"; [ -f "$f" ] || return 0
+  local clone tgt; clone=$(jq -r .clone "$f"); tgt=$(jq -r .target "$f")
+  [ "$tgt" = local ] && t_parse "local:$clone" || t_parse "$tgt"
+  t_exec zfs destroy "$clone" && { rm -f "$f"; log "unstaged $clone"; } || log "unstage failed: $clone"
+}
+cmd_unstage() {
+  local f now; now=$(date +%s)
+  for f in "$SHIVE_VAR"/restore/*.json; do
+    [ -f "$f" ] || continue
+    if [ $ALL = 1 ] || [ "$(jq -r .id "$f")" = "$ID" ]; then unstage_one "$f"
+    elif [ $EXPIRED = 1 ] && [ $(( now - $(jq -r .created "$f") )) -gt "${RESTORE_CLONE_TTL:-7200}" ]; then unstage_one "$f"; fi
+  done
+}
+
+# ---- file / folder restore ---------------------------------------------------
+cmd_file() {
+  [ -n "$SNAPSPEC" ] && [ -n "$DEST" ] || die "--snapshot and --dest required"
+  [[ "$REL" == *..* ]] && die "invalid --path"
+  local st; st=$(cmd_stage) || exit 1
+  local src; src="$(jq -r .path <<<"$st")/${REL#/}"; local remote; remote=$(jq -r .remote <<<"$st")
+  local dest="$DEST"
+  if [ "$MODE" = copy ]; then dest="${DEST%/}.shive-restore-$(date +%Y%m%d-%H%M%S)"
+  else [ $YES = 1 ] || die "overwrite mode requires --yes (explicit confirmation)"; fi
+  local rsargs=(-aHAX --numeric-ids --info=stats1)
+  [ "$DRY_RUN" = 1 ] && rsargs+=(--dry-run -v)
+  set_target
+  # trailing slash semantics: restore the object itself into $dest
+  if [ "$remote" = true ]; then
+    run_cmd rsync "${rsargs[@]}" -e "$(t_ssh_cmd | sed 's/ [^ ]*@[^ ]*$//')" "${T_USER}@${T_HOST}:$src" "$dest"
+  else
+    if [ -d "$src" ]; then mkdir -p "$dest"; run_cmd rsync "${rsargs[@]}" "$src/" "$dest/"
+    else mkdir -p "$(dirname "$dest")"; run_cmd rsync "${rsargs[@]}" "$src" "$dest"; fi
+  fi
+  local rc=$?
+  [ -n "$(jq -r '.staged_id // empty' <<<"$st")" ] && { ID=$(jq -r .staged_id <<<"$st"); cmd_unstage; }
+  [ $rc = 0 ] && { log "restored $SNAPSPEC:$REL -> $dest ($MODE)"; notify normal "Shive: restore done" "$REL from $SNAPSPEC -> $dest"; } \
+              || { log "restore FAILED $SNAPSPEC:$REL"; notify alert "Shive: restore FAILED" "$REL from $SNAPSPEC"; }
+  return $rc
+}
+
+# ---- full dataset restore (local source snapshot) ----------------------------
+cmd_dataset() {
+  [ -n "$SNAPSPEC" ] || die "--snapshot required"
+  [ $YES = 1 ] || die "dataset restore requires --yes (explicit confirmation)"
+  local ds="${SNAPSPEC%@*}" snap="${SNAPSPEC#*@}"
+  dataset_exists "$ds" || die "dataset $ds missing"
+  mapfile -t tree < <(zfs list -H -r -o name "$ds")
+  # container guard: same discovery as schedules, keyed by dataset
+  source "$(dirname "$0")/lib/guard-docker.sh"
+  state_init "restore-$(sanitize "$ds")"
+  state_set '.containers=$c' --argjson c "$($SHIVE_CLI linked-dataset "$ds")"
+  trap 'guard_resume; exit' EXIT INT TERM
+  guard_quiesce || die "could not stop linked containers - restore aborted"
+  # safety snapshot before anything destructive (own mini-retention)
+  local pre; pre=$(snap_name "shive-prerestore-" "$ds")
+  run_cmd zfs snapshot -r "$ds@$pre" || die "pre-restore snapshot failed"
+  local old; for old in $(snap_names "$ds" | grep '^shive-prerestore-' | head -n -"${PRERESTORE_KEEP:-3}"); do run_cmd zfs destroy -r "$ds@$old"; done
+  local rc=0 d
+  for d in "${tree[@]}"; do
+    if ! zfs list -H -o name "$d@$snap" >/dev/null 2>&1; then log "no snapshot $snap on $d - skipped"; continue; fi
+    if [ "$METHOD" = rollback ]; then
+      run_cmd zfs rollback -r "$d@$snap" || rc=1
+    else
+      local mp; mp=$(zfs get -H -o value mountpoint "$d")
+      [ "$(zfs get -H -o value mounted "$d")" = yes ] || { log "$d not mounted - skipped"; continue; }
+      local ex=(); local c
+      for c in "${tree[@]}"; do [[ "$c" == "$d/"* ]] && [[ "${c#$d/}" != */* ]] && ex+=(--exclude "/${c#$d/}/"); done
+      local rs=(-aHAX --numeric-ids --delete --exclude '/.zfs/' "${ex[@]}")   # .zfs is virtual; with snapdir=visible rsync would try to delete it
+      [ "$DRY_RUN" = 1 ] && rs+=(--dry-run -v)
+      run_cmd rsync "${rs[@]}" "$mp/.zfs/snapshot/$snap/" "$mp/" || rc=1
+    fi
+  done
+  trap - EXIT INT TERM
+  guard_resume || rc=2
+  mv "$STATE_FILE" "$STATE_FILE.done" 2>/dev/null
+  [ $rc = 0 ] && notify normal "Shive: dataset restore done" "$ds restored to $snap ($METHOD); pre-restore snapshot $pre kept" \
+              || notify alert "Shive: dataset restore FAILED" "$ds <- $snap ($METHOD), rc=$rc"
+  return $rc
+}
+
+# ---- disaster recovery: receive a backup snapshot into a NEW dataset --------
+cmd_dr() {
+  [ -n "$SNAPSPEC" ] && [ -n "$TO" ] || die "--snapshot and --to required"
+  [ "$TARGET" = local ] && TARGET="local:${SNAPSPEC%@*}"      # GUI passes 'local' for datasets on this box
+  dataset_exists "$TO" && die "refusing: $TO already exists (never receive -F onto live data)"
+  t_parse "$TARGET"
+  local rf=""; [ $REC = 1 ] && rf="-R"
+  log "DR receive $SNAPSPEC from [$T_TYPE] -> $TO"
+  if [ "$DRY_RUN" = 1 ]; then log "DRY-RUN: t_exec zfs send $rf $SNAPSPEC | zfs receive -u -x mountpoint $TO"; return 0; fi
+  t_exec zfs send $rf "$SNAPSPEC" | zfs receive -u -x mountpoint "$TO" || { notify alert "Shive: DR restore FAILED" "$SNAPSPEC -> $TO"; return 1; }
+  notify normal "Shive: DR restore done" "$SNAPSPEC received as $TO. Swap in via: zfs rename <live> <live>-old && zfs rename $TO <live>"
+}
+
+case "$CMD" in
+  stage) cmd_stage;; unstage) cmd_unstage;; file) cmd_file;; dataset) cmd_dataset;; dr) cmd_dr;;
+  *) die "usage: shive-restore stage|unstage|file|dataset|dr ...";; esac

@@ -1,0 +1,126 @@
+<?xml version='1.0' standalone='yes'?>
+<!DOCTYPE PLUGIN [
+<!ENTITY name      "shive">
+<!ENTITY author    "heinrichchristopher">
+<!ENTITY version   "2026.09.12">
+<!ENTITY launch    "Settings/Shive">
+<!ENTITY gitURL    "https://raw.githubusercontent.com/heinrichchristopher/shive/main">
+<!ENTITY pluginURL "&gitURL;/shive.plg">
+<!ENTITY pkgURL    "https://github.com/heinrichchristopher/shive/releases/download/&version;">
+<!ENTITY pkgName   "shive-&version;-noarch-1.txz">
+<!ENTITY pkgMD5    "0f699c16e3c239eff690ce6d616769a7">
+<!ENTITY plgPath   "/boot/config/plugins/&name;">
+<!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
+]>
+
+<PLUGIN name="&name;" author="&author;" version="&version;" launch="&launch;"
+        pluginURL="&pluginURL;" min="7.2.0" icon="shive.png"
+        support="https://github.com/heinrichchristopher/shive/issues">
+
+<CHANGES>
+###2026.09.12
+- Run logs and retired run-state files are now capped (newest 200 / 50) instead of growing for
+  the whole uptime; the cron file is no longer rewritten to flash when it is already correct.
+- The snapshot tag prefix is derived in one place (PHP) and read by all three scripts, instead of
+  being rebuilt from a literal in two of them.
+###2026.09.11 (cleanup)
+- Validation: backup target roots, remote host/user/port are now checked the same way source
+  datasets always were, at save time instead of failing later at run time.
+- Removed dead code (human_bytes, op=schedule, op=schedule_rename, cli schedule-list) and
+  de-duplicated two rules that existed in two places (container matching, derived-field list).
+###2026.09.11 (catch-up fix)
+- Fix: a schedule that had never run looked infinitely overdue to the array-start catch-up logic,
+  so it fired immediately on every reboot regardless of its actual scheduled time. Schedules now
+  track a creation timestamp and are only caught up relative to that.
+###2026.09.11 (later)
+- Fix: an orphaned `docker stop` from a killed run kept the schedule lock held, silently skipping
+  the next scheduled run. Fix: a single missing source dataset no longer fails the whole schedule -
+  it is skipped with a warning and the remaining datasets are still snapshotted.
+- Backup target fields are a ROOT now: every source lands at &lt;root&gt;/&lt;basename&gt;. Four call sites
+  that open-coded the old rule were corrected (important-flag targeting, prune preview, remote
+  snapshot browsing, connection test).
+###2026.09.11
+- QC pass: 76-check regression suite (test/run.sh); fixes: name collision check across the
+  whole tree, orphaned child snapshots swept by recursive prune, own-schedule targets skipped on
+  manual runs too, important-flag sync also when nothing needs sending, forged ids rejected,
+  list fields (datasets/exclude_props) no longer merged with defaults, PATH appended not prepended.
+- Important flag (shive:important) on snapshots, propagated to every copy and reconciled on send;
+  manual snapshot deletion; hourly GFS tier; schedules keyed by id with free-form names;
+  cron fallback + warning when update_cron cannot see the plugin directory.
+###2026.09.08
+- Initial release: generic ZFS snapshot scheduling, GFS/age retention per location,
+  optional Docker quiesce/resume, local + SSH replication (-I incremental, bookmark base),
+  snapshot browser/restore, dashboard tile, Unraid notifications.
+</CHANGES>
+
+<!-- ================================================================== -->
+<!-- pre-install: sanity checks                                          -->
+<!-- ================================================================== -->
+<FILE Run="/bin/bash">
+<INLINE>
+set -e
+for bin in zfs zpool jq docker php rsync flock findmnt; do
+  command -v "$bin" >/dev/null 2>&amp;1 || { echo "shive: required binary '$bin' not found"; exit 1; }
+done
+mkdir -p &plgPath;/schedules &plgPath;/state
+[ -f &plgPath;/shive.cfg ] || cat > &plgPath;/shive.cfg &lt;&lt;'CFG'
+LOG_DIR="/var/log/shive"
+NOTIFY_ON_SUCCESS="yes"
+DOCKER_STOP_TIMEOUT="60"
+SSH_KEY=""
+SSH_OPTS="-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"
+CATCHUP_ON_START="yes"
+RESTORE_CLONE_TTL="7200"
+PRERESTORE_KEEP="3"
+CFG
+[ -f &plgPath;/mappings.json ] || echo '{}' > &plgPath;/mappings.json
+</INLINE>
+</FILE>
+
+<!-- ================================================================== -->
+<!-- package download + install                                          -->
+<!-- ================================================================== -->
+<FILE Name="&plgPath;/&pkgName;" Run="upgradepkg --install-new">
+<URL>&pkgURL;/&pkgName;</URL>
+<MD5>&pkgMD5;</MD5>
+</FILE>
+
+<!-- ================================================================== -->
+<!-- post-install: permissions, cron, recovery, status                   -->
+<!-- ================================================================== -->
+<FILE Run="/bin/bash">
+<INLINE>
+set -e
+chmod 0755 &emhttp;/scripts/shive-* &emhttp;/event/*
+mkdir -p /var/local/shive/{state,locks,restore} /var/log/shive
+# regenerate cron from schedules (idempotent) and run container-resume safety net
+php &emhttp;/include/cli.php cron-write
+&emhttp;/scripts/shive-recover || true
+php &emhttp;/include/cli.php status-rebuild || true
+echo ""
+echo "-----------------------------------------------------------"
+echo " shive &version; installed. Settings -> Shive"
+echo "-----------------------------------------------------------"
+</INLINE>
+</FILE>
+
+<!-- ================================================================== -->
+<!-- remove                                                              -->
+<!-- ================================================================== -->
+<FILE Run="/bin/bash" Method="remove">
+<INLINE>
+# stop running jobs gracefully
+pkill -TERM -f "&emhttp;/scripts/shive-run" 2>/dev/null || true
+sleep 2
+# resume anything left quiesced
+&emhttp;/scripts/shive-recover || true
+rm -f &plgPath;/shive.cron /boot/config/plugins/dynamix/shive.cron
+update_cron
+removepkg &name; 2>/dev/null || true
+rm -rf &emhttp; /var/local/shive
+# NOTE: &plgPath; (schedules, mappings, last-status) is intentionally kept.
+echo "shive removed. Config left in &plgPath; - delete manually if unwanted."
+</INLINE>
+</FILE>
+
+</PLUGIN>

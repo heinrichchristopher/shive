@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+import sys, json, os
+ST='/tmp/fakedocker.json'
+s = json.load(open(ST)) if os.path.exists(ST) else {}
+a = sys.argv[1:]
+open('/tmp/docker.log','a').write(' '.join(a)+'\n')
+if a[0]=='ps':
+    for n in s: print(n)
+elif a[0]=='inspect':
+    fmt = a[a.index('--format')+1] if '--format' in a else (a[a.index('-f')+1] if '-f' in a else None)
+    names = [x for x in a[1:] if not x.startswith('-') and x != fmt]
+    for n in names:
+        c = s.get(n)
+        if not c: print(f"Error: No such object: {n}", file=sys.stderr); sys.exit(1)
+        if fmt and 'State.Running' in fmt and '|SHIVE|' in fmt:
+            print(f"/{n}|SHIVE|{'true' if c['running'] else 'false'}|SHIVE|{json.dumps(c['mounts'])}")
+        elif fmt and 'State.Running' in fmt:
+            print('true' if c['running'] else 'false')
+elif a[0]=='stop':
+    n=a[-1]
+    delay = s.get(n, {}).get('stop_delay', 0)   # simulates a container ignoring SIGTERM: docker stop blocks
+    if delay: __import__('time').sleep(delay)   # for its full -t timeout before returning, like the real thing
+    s[n]['running']=False; json.dump(s,open(ST,'w'))
+elif a[0]=='start':
+    n=a[-1]; s[n]['running']=True; json.dump(s,open(ST,'w'))

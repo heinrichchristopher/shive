@@ -1,0 +1,5 @@
+.shive-tile-logo{width:32px;height:32px;vertical-align:middle}
+.Theme--black .shive-tile-logo,.Theme--gray .shive-tile-logo{filter:invert(1)}
+.shive-health-ok{color:var(--green-500,#5cb85c)}.shive-health-warning{color:var(--orange-500,#f0ad4e)}.shive-health-error{color:var(--red-500,#d9534f)}
+#shive-tile-body .shive-row{display:flex;justify-content:space-between;gap:.5rem;padding:.15rem 0;border-bottom:1px dotted var(--gray-300,#ccc)}
+#shive-tile-body .shive-row:last-child{border:0}#shive-tile-body .shive-meta{opacity:.75;font-size:.9em}

@@ -1,0 +1,4 @@
+#!/bin/bash
+# docker daemon up: now container resume (safety net) and catch-up of missed runs are safe
+/usr/local/emhttp/plugins/shive/scripts/shive-recover || true
+php /usr/local/emhttp/plugins/shive/include/cli.php catchup || true

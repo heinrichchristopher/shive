@@ -1,0 +1,110 @@
+#!/bin/bash
+# shive-snapshot – manual per-snapshot operations from the GUI.
+#   shive-snapshot flag    --snapshot <ds@snap> [--target <spec>] [--recursive]
+#   shive-snapshot unflag  --snapshot <ds@snap> [--target <spec>] [--recursive]
+#   shive-snapshot destroy --snapshot <ds@snap> [--target <spec>] [--recursive] --yes [--dry-run]
+# "flag" sets the ZFS user property shive:important=1, which retention treats as untouchable.
+# --recursive applies to the snapshot of the same name on every child dataset.
+set -uo pipefail
+source "$(dirname "$0")/lib/common.sh"
+load_cfg
+# shellcheck disable=SC2034  # read by log() in common.sh
+SCHED="snapshot"
+# shellcheck disable=SC2034
+LOG_FILE="$LOG_DIR/snapshot.log"
+
+CMD="${1:-}"; shift || true
+SNAPSPEC=""; TARGET="local"; REC=0; YES=0
+# shellcheck disable=SC2034  # DRY_RUN is read by run_cmd() in common.sh
+while [ $# -gt 0 ]; do case "$1" in
+  --snapshot) SNAPSPEC="$2"; shift 2;; --target) TARGET="$2"; shift 2;;
+  --recursive) REC=1; shift;; --yes) YES=1; shift;; --dry-run) DRY_RUN=1; shift;;
+  *) die "unknown option $1";; esac; done
+[ -n "$SNAPSPEC" ] || die "--snapshot <dataset@snapshot> required"
+case "$SNAPSPEC" in *@*) ;; *) die "not a snapshot: $SNAPSPEC";; esac
+DS="${SNAPSPEC%@*}"; SNAP="${SNAPSPEC#*@}"
+[ "$TARGET" = local ] && t_parse "local:$DS" || t_parse "$TARGET"
+
+# every dataset carrying a snapshot of this name (recursive) or just the one
+targets() {
+  if [ $REC = 1 ]; then t_exec zfs list -H -r -o name "$DS" 2>/dev/null
+  else echo "$DS"; fi
+}
+
+# ---- flag propagation -------------------------------------------------------
+# The important flag must exist on EVERY copy of a snapshot, because each location prunes
+# independently. zfs send cannot be relied on for this: a flag set after replication is never
+# re-sent, and a non-recursive send carries no properties at all. So we write it everywhere now,
+# and shive-send reconciles any location that was unreachable at the time (see sync_flags there).
+set_flag_at() {  # <target-spec> <dataset> <1|0>  -> 0 ok, 1 failed, 2 snapshot not present
+  local spec="$1" ds="$2" on="$3" d rc=0 found=0
+  local SAVE_TYPE="$T_TYPE" SAVE_DS="$T_DS" SAVE_HOST="$T_HOST" SAVE_PORT="$T_PORT" SAVE_USER="$T_USER"
+  [ "$spec" = local ] && t_parse "local:$ds" || t_parse "$spec"
+  if [ "$T_TYPE" = ssh ] && ! t_reachable; then
+    T_TYPE="$SAVE_TYPE"; T_DS="$SAVE_DS"; T_HOST="$SAVE_HOST"; T_PORT="$SAVE_PORT"; T_USER="$SAVE_USER"
+    return 3
+  fi
+  local list
+  if [ $REC = 1 ]; then list=$(t_exec zfs list -H -r -o name "$ds" 2>/dev/null); else list="$ds"; fi
+  for d in $list; do
+    t_exec zfs list -H -o name "$d@$SNAP" >/dev/null 2>&1 || continue
+    found=1
+    if [ "$on" = 1 ]; then
+      run_cmd t_exec zfs set shive:important=1 "$d@$SNAP" || rc=1
+    else
+      run_cmd t_exec zfs inherit shive:important "$d@$SNAP" || rc=1
+    fi
+  done
+  T_TYPE="$SAVE_TYPE"; T_DS="$SAVE_DS"; T_HOST="$SAVE_HOST"; T_PORT="$SAVE_PORT"; T_USER="$SAVE_USER"
+  [ $found = 0 ] && return 2
+  return $rc
+}
+
+case "$CMD" in
+  flag|unflag)
+    on=1; [ "$CMD" = unflag ] && on=0
+    rc=0; done_any=0; skipped=""
+    # all copies of this snapshot (source + local/remote target); falls back to just the
+    # clicked location if the snapshot does not belong to a known schedule
+    LOCS=$($SHIVE_CLI locations "$DS" "$SNAP" 2>/dev/null)
+    if [ -z "$LOCS" ] || [ "$LOCS" = "[]" ]; then
+      LOCS=$(jq -nc --arg t "$TARGET" --arg d "$DS" '[{target:$t,dataset:$d}]')
+    fi
+    while IFS=$'\t' read -r spec ds; do
+      [ -n "$ds" ] || continue
+      set_flag_at "$spec" "$ds" "$on"; r=$?
+      case $r in
+        0) done_any=1; log "$CMD ok: [$spec] $ds@$SNAP";;
+        2) log "$CMD: no $ds@$SNAP at [$spec] - nothing to do";;
+        3) skipped="$skipped $spec"; log "$CMD: [$spec] unreachable - will be reconciled on the next send";;
+        *) rc=1; log "$CMD FAILED: [$spec] $ds@$SNAP";;
+      esac
+    done < <(jq -r '.[] | "\(.target)\t\(.dataset)"' <<<"$LOCS")
+    [ $done_any = 0 ] && [ $rc = 0 ] && { log "$CMD: snapshot not found anywhere"; rc=1; }
+    [ -n "$skipped" ] && notify warning "Shive: flag not applied everywhere" \
+      "$SNAPSPEC could not be updated on:$skipped (unreachable). The next replication run will reconcile it."
+    exit $rc
+    ;;
+  destroy)
+    [ $YES = 1 ] || die "destroy requires --yes (explicit confirmation)"
+    # a snapshot with clones cannot be destroyed - report that clearly instead of a raw zfs error
+    for d in $(targets); do
+      t_exec zfs list -H -o name "$d@$SNAP" >/dev/null 2>&1 || continue
+      cl=$(t_exec zfs get -H -o value clones "$d@$SNAP" 2>/dev/null || echo -)
+      [ "$cl" != "-" ] && [ -n "$cl" ] && die "$d@$SNAP still has clones ($cl) - remove them first (Snapshots tab: close any open browse view)"
+    done
+    rc=0
+    for d in $(targets); do
+      t_exec zfs list -H -o name "$d@$SNAP" >/dev/null 2>&1 || continue
+      run_cmd t_exec zfs destroy "$d@$SNAP" || { log "destroy failed: $d@$SNAP"; rc=1; }
+    done
+    if [ $rc = 0 ]; then
+      log "destroyed $SNAPSPEC (recursive=$REC)"
+      notify normal "Shive: snapshot deleted" "$SNAPSPEC$( [ $REC = 1 ] && echo ' (incl. child datasets)')"
+    else
+      notify warning "Shive: snapshot deletion failed" "$SNAPSPEC"
+    fi
+    exit $rc
+    ;;
+  *) die "usage: shive-snapshot flag|unflag|destroy --snapshot <ds@snap> [...]";;
+esac

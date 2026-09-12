@@ -1,0 +1,8 @@
+#!/bin/bash
+# array started: pools imported -> regenerate cron. Container recovery and catch-up
+# wait for docker_started (daemon not up yet here); only if Docker is disabled do them now.
+php /usr/local/emhttp/plugins/shive/include/cli.php cron-write || true
+if ! grep -q '^DOCKER_ENABLED="yes"' /boot/config/docker.cfg 2>/dev/null; then
+  /usr/local/emhttp/plugins/shive/scripts/shive-recover || true
+  php /usr/local/emhttp/plugins/shive/include/cli.php catchup || true
+fi

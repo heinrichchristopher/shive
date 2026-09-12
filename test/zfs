@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+# Stateful ZFS simulator for shive sandbox tests. State: /tmp/fakezfs.json
+import sys, json, os, time, shutil, subprocess, signal
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+ST='/tmp/fakezfs.json'
+def load():
+    return json.load(open(ST)) if os.path.exists(ST) else {'ds':{}, 'clock': 1700000000}
+def save(s): json.dump(s, open(ST,'w'), indent=1)
+def die(m): print(m, file=sys.stderr); sys.exit(1)
+def tick(s): s['clock'] += 60; return s['clock']
+def mp(name): return '/mnt/' + name
+def ds_new(s, name, props=None):
+    p = {'mountpoint': mp(name), 'encryption': 'off', 'readonly': 'off', 'canmount': 'on'}
+    if props: p.update(props)
+    s['ds'][name] = {'props': p, 'snaps': {}, 'snapprops': {}, 'bms': {}, 'token': '-'}
+    if p.get('canmount') != 'off': os.makedirs(p['mountpoint'], exist_ok=True)
+def children(s, name, depth=None):
+    out=[]
+    for n in s['ds']:
+        if n == name or n.startswith(name+'/'):
+            d = n[len(name):].count('/')
+            if depth is None or d <= depth: out.append(n)
+    return sorted(out)
+def snapdir_copy(name, snap):
+    m = mp(name)
+    if not os.path.isdir(m): return
+    dst = os.path.join(m, '.zfs', 'snapshot', snap)
+    os.makedirs(dst, exist_ok=True)
+    for e in os.listdir(m):
+        if e == '.zfs': continue
+        srcp = os.path.join(m, e)
+        if os.path.isdir(srcp) and os.path.ismount(srcp): continue
+        # skip child dataset mountpoints
+        if os.path.isdir(srcp) and any(x == m + '/' + e for x in [mp(c) for c in load()['ds']]):
+            os.makedirs(os.path.join(dst, e), exist_ok=True); continue   # real zfs: empty dir at a child mountpoint
+        if os.path.isdir(srcp): shutil.copytree(srcp, os.path.join(dst,e), dirs_exist_ok=True)
+        else: shutil.copy2(srcp, dst)
+a = sys.argv[1:]
+if not a: die('usage')
+cmd = a[0]; s = load()
+def flags(args, opts_with_val):
+    f={}; rest=[]; i=0
+    while i < len(args):
+        x=args[i]
+        if x.startswith('-') and len(x)>1 and not x.startswith('--'):
+            k=x
+            if k in opts_with_val: f[k]=args[i+1]; i+=2; continue
+            f[k]=True; i+=1; continue
+        rest.append(x); i+=1
+    return f, rest
+if cmd == 'list':
+    f, rest = flags(a[1:], ['-o','-t','-d','-s','-S'])
+    typ = f.get('-t','filesystem'); cols = f.get('-o','name').split(',')
+    target = rest[0] if rest else None
+    depth = int(f['-d']) if '-d' in f else (None if '-r' in f else 0)
+    rows=[]
+    if '@' in (target or '') or '#' in (target or ''):
+        dsn, sn = target.replace('#','@').split('@',1)
+        d = s['ds'].get(dsn)
+        if not d or (sn not in d['snaps'] and sn not in d['bms']): die(f"cannot open '{target}': dataset does not exist")
+        c = d['snaps'].get(sn, d['bms'].get(sn))
+        rows.append({'name': target, 'creation': c})
+    else:
+        if target and target not in s['ds']: die(f"cannot open '{target}': dataset does not exist")
+        names = children(s, target, depth) if target else sorted(s['ds'])
+        if target and '-d' in f and depth == 1 and typ != 'filesystem': names=[target]
+        for n in names:
+            d=s['ds'][n]
+            if typ == 'filesystem':
+                rows.append({'name': n, 'creation': 0, 'mountpoint': d['props']['mountpoint'], 'mounted': 'yes' if d['props'].get('canmount')!='off' and os.path.isdir(d['props']['mountpoint']) else 'no', 'used': 1000, 'avail': 10**9, 'encryption': d['props']['encryption'], 'referenced': 1000})
+            elif typ == 'snapshot':
+                for sn, c in d['snaps'].items():
+                    row = {'name': f'{n}@{sn}', 'creation': c, 'used': 100, 'referenced': 1000, 'clones': '-'}
+                    for k, v in d.get('snapprops', {}).get(sn, {}).items(): row[k] = v
+                    rows.append(row)
+            elif typ == 'bookmark':
+                for bn, c in d['bms'].items(): rows.append({'name': f'{n}#{bn}', 'creation': c})
+    if '-s' in f: rows.sort(key=lambda r: r[f['-s']])
+    if '-S' in f: rows.sort(key=lambda r: r[f['-S']], reverse=True)
+    for r in rows: print('\t'.join(str(r.get(c,'-')) for c in cols))
+elif cmd == 'snapshot':
+    f, rest = flags(a[1:], [])
+    dsn, sn = rest[0].split('@')
+    if dsn not in s['ds']: die('no such dataset')
+    for n in (children(s, dsn) if '-r' in f else [dsn]):
+        if sn in s['ds'][n]['snaps']: die(f"cannot create snapshot '{n}@{sn}': dataset already exists")
+        s['ds'][n]['snaps'][sn] = tick(s); snapdir_copy(n, sn)
+    save(s)
+elif cmd == 'destroy':
+    f, rest = flags(a[1:], [])
+    t = rest[0]
+    if '@' in t:
+        dsn, sn = t.split('@')
+        for n in (children(s, dsn) if '-r' in f else [dsn]):
+            s['ds'][n]['snaps'].pop(sn, None); shutil.rmtree(os.path.join(mp(n),'.zfs','snapshot',sn), ignore_errors=True)
+    elif '#' in t:
+        dsn, bn = t.split('#'); s['ds'][dsn]['bms'].pop(bn, None)
+    else:
+        for n in children(s, t): s['ds'].pop(n, None); shutil.rmtree(mp(n), ignore_errors=True)
+    save(s)
+elif cmd == 'bookmark':
+    src, bm = a[1], a[2]; dsn, sn = src.split('@'); bn = bm.split('#')[1]
+    s['ds'][dsn]['bms'][bn] = s['ds'][dsn]['snaps'][sn]; save(s)
+elif cmd == 'get':
+    f, rest = flags(a[1:], ['-o'])
+    props = rest[0].split(','); t = rest[1]
+    dsn = t.split('@')[0]; d = s['ds'].get(dsn)
+    if not d: die(f"cannot open '{t}': dataset does not exist")
+    if '@' in t:
+        sn = t.split('@')[1]
+        sp = d.get('snapprops', {}).get(sn, {})
+        for p in props:
+            print(sp.get(p, '-') if p != 'creation' else d['snaps'].get(sn, 0))
+        sys.exit(0)
+    for p in props:
+        if p == 'mounted': v = 'yes' if d['props'].get('canmount')!='off' and os.path.isdir(d['props']['mountpoint']) else 'no'
+        elif p == 'receive_resume_token': v = d['token']
+        elif p == 'creation': v = d['snaps'].get(t.split('@')[1], 0)
+        else: v = d['props'].get(p, '-')
+        print(v)
+elif cmd == 'create':
+    f, rest = flags(a[1:], ['-o'])
+    props={}
+    i=1
+    while i < len(a):
+        if a[i]=='-o': k,v=a[i+1].split('=',1); props[k]=v; i+=2
+        else: i+=1
+    ds_new(s, rest[0], props); save(s)
+elif cmd == 'clone':
+    props={}; i=1
+    while i < len(a):
+        if a[i]=='-o': k,v=a[i+1].split('=',1); props[k]=v; i+=2
+        else: i+=1
+    rest=[x for x in a[1:] if not x.startswith('-') and '=' not in x]
+    src, new = rest[0], rest[1]; dsn, sn = src.split('@')
+    ds_new(s, new, props); 
+    sd = os.path.join(mp(dsn),'.zfs','snapshot',sn)
+    if os.path.isdir(sd): shutil.copytree(sd, s['ds'][new]['props']['mountpoint'], dirs_exist_ok=True)
+    save(s)
+elif cmd == 'rollback':
+    f, rest = flags(a[1:], []); dsn, sn = rest[0].split('@')
+    d = s['ds'][dsn]; c = d['snaps'][sn]
+    for k in [k for k,v in d['snaps'].items() if v > c]: d['snaps'].pop(k)
+    save(s)
+elif cmd == 'send':
+    f, rest = flags(a[1:], ['-I','-i','-t'])
+    if '-t' in f: 
+        tok = json.loads(f['-t']); stream = tok
+    else:
+        src = rest[0]; dsn, sn = src.split('@')
+        base = f.get('-I') or f.get('-i')
+        names = children(s, dsn) if '-R' in f else [dsn]
+        stream = {'root': dsn, 'snap': sn, 'base': base.lstrip('@#') if base else None, 'base_is_bm': bool(base and base.startswith('#') or (base and '#' in base)), 'full_I': '-I' in f, 'datasets': {}}
+        if base and '#' in base: stream['base'] = base.split('#')[1]
+        for n in names:
+            d = s['ds'][n]
+            if sn not in d['snaps']: die(f"cannot send '{n}@{sn}': snapshot does not exist")
+            snaps = {k:v for k,v in d['snaps'].items()}
+            if stream['base'] and not stream['base_is_bm']:
+                bc = d['snaps'].get(stream['base'])
+                if bc is None and '-R' in f and n != dsn:
+                    stream['datasets'][n] = {'props': d['props'], 'snaps': dict(d['snaps']), 'full': True}; continue
+                if bc is None: die(f"incremental source {n}@{stream['base']} does not exist")
+                snaps = {k:v for k,v in snaps.items() if v > bc and v <= d['snaps'][sn]} if stream['full_I'] else {sn: d['snaps'][sn]}
+            elif stream['base_is_bm']:
+                bc = d['bms'].get(stream['base'])
+                if bc is None: die(f"incremental source {n}#{stream['base']} does not exist")
+                snaps = {sn: d['snaps'][sn]}
+            stream['datasets'][n] = {'props': d['props'], 'snaps': snaps}
+    if '-n' in f:
+        print('size\t' + str(sum(len(v['snaps'])*1000 for v in stream['datasets'].values())))
+    else:
+        print(json.dumps(stream))
+elif cmd == 'receive':
+    f, rest = flags(a[1:], ['-o','-x'])
+    tgt = rest[-1]
+    excl = [a[i+1] for i in range(len(a)) if a[i]=='-x']
+    setp = dict(a[i+1].split('=',1) for i in range(len(a)) if a[i]=='-o')
+    stream = json.loads(sys.stdin.read())
+    root = stream['root']
+    for n, d in stream['datasets'].items():
+        tn = tgt + n[len(root):]
+        exists = tn in s['ds']
+        if stream['base'] and not d.get('full'):
+            if not exists: die(f"cannot receive incremental stream: destination '{tn}' does not exist")
+            td = s['ds'][tn]
+            if not stream['base_is_bm']:
+                if not td['snaps']: die("cannot receive incremental: destination has no snapshots")
+                newest = max(td['snaps'], key=lambda k: td['snaps'][k])
+                if newest != stream['base']: die(f"cannot receive incremental stream: most recent snapshot of {tn} does not match incremental source")
+        else:
+            if exists and not d.get('full'): die(f"cannot receive new filesystem stream: destination '{tn}' exists")
+            if exists: continue
+            props = {k:v for k,v in d['props'].items() if k not in excl}
+            props.setdefault('mountpoint', mp(tn)); props.update(setp)
+            if 'mountpoint' in excl: props['mountpoint'] = mp(tn)
+            ds_new(s, tn, props)
+        if setp: s['ds'][tn]['props'].update(setp)
+        for sn, c in d['snaps'].items():
+            s['ds'][tn]['snaps'][sn] = c
+            sd = os.path.join(mp(n),'.zfs','snapshot',sn)
+            if os.path.isdir(sd): shutil.copytree(sd, os.path.join(mp(tn),'.zfs','snapshot',sn), dirs_exist_ok=True)
+    save(s)
+elif cmd == 'set':
+    assign, target = a[1], a[2]
+    k, v = assign.split('=', 1)
+    dsn = target.split('@')[0]
+    if '@' in target:
+        sn = target.split('@')[1]
+        s['ds'][dsn].setdefault('snapprops', {}).setdefault(sn, {})[k] = v
+    else:
+        s['ds'][dsn]['props'][k] = v
+    save(s)
+elif cmd == 'inherit':
+    k, target = a[-2], a[-1]
+    dsn = target.split('@')[0]
+    if '@' in target:
+        sn = target.split('@')[1]
+        s['ds'][dsn].get('snapprops', {}).get(sn, {}).pop(k, None)
+    else:
+        s['ds'][dsn]['props'].pop(k, None)
+    save(s)
+elif cmd in ('mount','load-key','--version'):
+    if cmd == '--version': print('zfs-2.3.4-fake')
+    sys.exit(0)
+else:
+    die(f'fake zfs: unsupported: {a}')

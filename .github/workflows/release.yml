@@ -1,0 +1,54 @@
+name: Release
+
+# Publishing a version is a two-step flow, on purpose:
+#
+#   1. locally:  ./build.sh 2026.09.12      -> patches version AND the package MD5 into shive.plg
+#                git commit -am "release 2026.09.12" && git push
+#   2. then:     git tag 2026.09.12 && git push origin 2026.09.12
+#
+# Users install from the shive.plg in main, so that committed file must already contain the MD5
+# of the exact package this workflow attaches to the release. The workflow therefore rebuilds and
+# verifies rather than patching: if the committed .plg does not match what the build produces,
+# the release fails instead of shipping a .plg whose MD5 check will reject the download.
+on:
+  push:
+    tags: ['*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y libxml2-utils
+
+      - name: Record the committed .plg
+        run: cp shive.plg /tmp/committed.plg
+
+      - name: Build the package for this tag
+        run: ./build.sh "${GITHUB_REF_NAME}"
+
+      - name: The committed .plg must already match this build (version + MD5)
+        run: |
+          if ! diff -u /tmp/committed.plg shive.plg; then
+            echo
+            echo "The shive.plg committed to main does not match tag ${GITHUB_REF_NAME}."
+            echo "Run './build.sh ${GITHUB_REF_NAME}', commit the updated shive.plg, then re-tag."
+            exit 1
+          fi
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/shive-${{ github.ref_name }}-noarch-1.txz
+          body: |
+            **Install URL** (Unraid → Plugins → Install Plugin):
+
+            ```
+            https://raw.githubusercontent.com/heinrichchristopher/shive/main/shive.plg
+            ```
+
+            See the `CHANGES` section in `shive.plg` for what changed in this version.

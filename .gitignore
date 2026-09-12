@@ -1,0 +1,8 @@
+# build output (packages are attached to GitHub releases, not committed)
+/build/
+*.txz
+
+# editor / OS noise
+*.swp
+*~
+.DS_Store

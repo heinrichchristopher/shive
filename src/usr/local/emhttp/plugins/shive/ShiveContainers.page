@@ -1,0 +1,17 @@
+Menu="Shive:2"
+Title="Containers"
+Tabs="true"
+Markdown="false"
+---
+<?php require_once '/usr/local/emhttp/plugins/shive/include/head.php'; ?>
+<div class="shive" id="shive-containers">
+  <p class="shive-hint">Auto-discovered from each container's bind mounts (<code>docker inspect</code> → <code>findmnt -T</code> → ZFS dataset). Override where discovery cannot resolve a path (e.g. paths through <code>/mnt/user</code> that do not exist on any pool) or tick <em>ignore</em> for containers that must never be stopped.</p>
+  <div class="TableContainer">
+  <table class="tablesorter shift shive-table">
+    <thead><tr><th>Container</th><th>State</th><th>Discovered datasets</th><th>Bind mounts</th><th>Override datasets (comma separated)</th><th>Ignore</th></tr></thead>
+    <tbody id="ctr-rows"><tr><td colspan="6">loading…</td></tr></tbody>
+  </table>
+  </div>
+  <p><span class="buttons-spaced"><input type="button" value="Save overrides" onclick="Shive.ctr.save()"> <input type="button" value="Rescan" onclick="Shive.ctr.load(true)"></span> <span id="ctr-msg" class="shive-hint"></span></p>
+</div>
+<script>$(function(){ Shive.ctr.load(false); });</script>

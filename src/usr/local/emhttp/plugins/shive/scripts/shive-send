@@ -1,0 +1,152 @@
+#!/bin/bash
+# shive-send – replicate one snapshot to a local or ssh target.
+#   shive-send --sched <name> --from <ds@snap> --to <local:ds | ssh://user@host:port/ds>
+#              [--recursive] [--exclude-props a,b] [--dry-run]
+# Incremental base selection:
+#   1. resume token on target (interrupted stream)      -> zfs send -t <token>
+#   2. newest snapshot shared by source & target        -> zfs send -I @base   (intermediates included)
+#   3. bookmark on source from last successful send     -> zfs send -i #bm     (bookmarks can't do -I)
+#   4. target dataset absent                            -> full send
+#   5. target exists but nothing in common              -> refuse (needs replication reset)
+set -uo pipefail
+source "$(dirname "$0")/lib/common.sh"
+load_cfg
+
+SCHED=""; FROM=""; TO=""; REC=0; EXCL="mountpoint,canmount,sharenfs,sharesmb"
+while [ $# -gt 0 ]; do case "$1" in
+  --sched) SCHED="$2"; shift 2;; --from) FROM="$2"; shift 2;; --to) TO="$2"; shift 2;;
+  --recursive) REC=1; shift;; --exclude-props) EXCL="$2"; shift 2;; --dry-run) DRY_RUN=1; shift;;
+  *) die "unknown option $1";; esac; done
+[ -n "$SCHED" ] && [ -n "$FROM" ] && [ -n "$TO" ] || die "usage: shive-send --sched --from ds@snap --to spec"
+
+SRC_DS="${FROM%@*}"; SNAP="${FROM#*@}"
+SCHED_JSON=$($SHIVE_CLI schedule-get "$SCHED") || die "schedule not found"
+SID=$(jq -r .id <<<"$SCHED_JSON")
+PREFIX=$(jq -r .tag_prefix <<<"$SCHED_JSON")   # single source of truth: shive_tag_prefix() in PHP
+t_parse "$TO"
+BM_NAME="shive-${SID}-bm-${T_ID}"     # bookmark name; kept on EVERY dataset of the tree (see below)
+BM="${SRC_DS}#${BM_NAME}"
+lock_wait "target-$T_ID" 8 600         # serialize receives into the same target
+
+RFLAG=""; [ $REC = 1 ] && RFLAG="-R"
+WFLAG=""; [ "$(zfs get -H -o value encryption "$SRC_DS")" != off ] && WFLAG="-w"
+XFLAGS=(); IFS=',' read -ra props <<<"$EXCL"; for p in "${props[@]}"; do [ -n "$p" ] && XFLAGS+=(-x "$p"); done
+
+# readonly=on on the target: a mounted, non-readonly target picks up atime writes on browse,
+# and the next incremental receive then fails with "destination has been modified".
+recv_cmd() { echo zfs receive -u -s -o readonly=on "${XFLAGS[@]}" "$T_DS"; }
+# shellcheck disable=SC2046,SC2091  # recv_cmd/t_ssh_cmd print a command line that is meant to be
+#                                     split into words and executed; the parts are fixed literals
+#                                     plus a dataset name already validated at save time
+pipe_send() { # <zfs send args...>  ->  runs the send|receive pipeline into $T_DS
+  local est; est=$(zfs send -nvP "$@" 2>/dev/null | awk '/^size/{print $2}')
+  log "send: zfs send $* -> [$T_TYPE] $T_DS (est. $(numfmt --to=iec "${est:-0}" 2>/dev/null || echo "$est") bytes)"
+  [ "$DRY_RUN" = 1 ] && { log "DRY-RUN: zfs send $* | $(recv_cmd)"; return 0; }
+  if [ "$T_TYPE" = local ]; then
+    zfs send "$@" | $(recv_cmd)
+  else
+    zfs send "$@" | $(t_ssh_cmd) "$(printf '%q ' $(recv_cmd))"
+  fi
+}
+
+# 1. interrupted stream? finish it first
+if t_dataset_exists "$T_DS"; then
+  token=$(t_exec zfs get -H -o value receive_resume_token "$T_DS" 2>/dev/null || echo "-")
+  if [ "$token" != "-" ] && [ -n "$token" ]; then
+    log "resume token found on target - resuming interrupted stream"
+    pipe_send -t "$token" || die "resuming interrupted stream failed"
+  fi
+fi
+
+# 2./3./4./5. pick base and send
+if t_dataset_exists "$T_DS"; then
+  mapfile -t tsnaps < <(t_snap_names "$T_DS" | grep "^$PREFIX" || true)
+  if printf '%s\n' "${tsnaps[@]}" | grep -qx "$SNAP"; then
+    log "target already has @$SNAP - nothing to send"
+    NOOP=1            # send-only re-runs, retries after a post-receive failure - still reconcile flags below
+  fi
+  base=""
+  [ "${NOOP:-0}" = 1 ] || for s in $(snap_names "$SRC_DS" | grep "^$PREFIX" | tac); do   # newest source snapshot first
+    [ "$s" = "$SNAP" ] && continue
+    if printf '%s\n' "${tsnaps[@]}" | grep -qx "$s"; then base="$s"; break; fi
+  done
+  if [ "${NOOP:-0}" = 1 ]; then
+    :
+  elif [ -n "$base" ]; then
+    # zfs receive refuses an incremental if the target's NEWEST snapshot isn't the base
+    # (e.g. a pre-restore or manual snapshot taken on the target) - say so plainly.
+    newest_t=$(t_exec zfs list -H -o name -s creation -t snapshot -d 1 "$T_DS" 2>/dev/null | tail -1 | sed 's/.*@//')
+    [ "$newest_t" = "$base" ] || die "target $T_DS has a snapshot newer than the shared base @$base (newest: @$newest_t) - zfs receive would refuse it; destroy the newer target snapshot(s) or reset replication"
+    log "incremental base: @$base (shared)"
+    pipe_send $RFLAG $WFLAG -I "@$base" "$FROM" || die "send/receive failed"
+  elif zfs list -H -t bookmark -o name "$BM" >/dev/null 2>&1; then
+    log "incremental base: bookmark #$BM_NAME (shared snapshot already pruned; intermediates lost)"
+    if [ $REC = 1 ]; then
+      # -R cannot take a bookmark as its incremental source: send each dataset of the tree on its
+      # own, from its own bookmark. A child that appeared since the last send has no bookmark and
+      # no target yet -> full send of just that child.
+      T_ROOT="$T_DS"
+      for d in $(zfs list -H -r -o name "$SRC_DS"); do
+        T_DS="$T_ROOT${d#$SRC_DS}"
+        if ! t_dataset_exists "$T_DS"; then
+          log "new child $d - full send"; pipe_send $WFLAG "$d@$SNAP" || die "send/receive of $d failed"
+        elif zfs list -H -t bookmark -o name "$d#$BM_NAME" >/dev/null 2>&1; then
+          pipe_send $WFLAG -i "$d#$BM_NAME" "$d@$SNAP" || die "send/receive of $d failed"
+        else
+          die "no bookmark and no shared snapshot for $d - reset replication for this dataset"
+        fi
+      done
+      T_DS="$T_ROOT"
+    else
+      pipe_send $WFLAG -i "$BM" "$FROM" || die "send/receive failed"
+    fi
+  else
+    if [ ${#tsnaps[@]} -eq 0 ]; then
+      die "target $T_DS exists but has never received anything from us (no shive-* snapshots) - likely pre-created empty. Safe to remove and retry: t_exec zfs destroy $T_DS (only if it truly has no data/snapshots you want - check first: zfs list -t all -r $T_DS)"
+    fi
+    die "target $T_DS exists and has other snapshots but shares none with $SRC_DS - reset replication (destroy target) to start over"
+  fi
+else
+  log "target absent - full send"
+  pipe_send $RFLAG $WFLAG "$FROM" || die "send/receive failed"
+fi
+
+# Reconcile the shive:important flag for every snapshot both sides share. Needed because a flag
+# set after a snapshot was replicated is never re-sent by zfs, and a non-recursive send carries no
+# properties at all - so without this a snapshot marked important on the source would still be
+# pruned away on the target, which prunes independently. Source is authoritative.
+sync_flags() {
+  local sds="$1" tds="$2" n sflag tflag
+  local -A want=()
+  while IFS=$'\t' read -r n sflag; do
+    [ -n "$n" ] || continue
+    want["${n#*@}"]="$sflag"
+  done < <(zfs list -H -o name,shive:important -t snapshot -d 1 "$sds" 2>/dev/null | (grep "$PREFIX" || true))
+  while IFS=$'\t' read -r n tflag; do
+    [ -n "$n" ] || continue
+    local sn="${n#*@}"; local w="${want[$sn]:-}"
+    [ -z "$w" ] && continue                       # not on the source (any more) - leave it alone
+    if [ "$w" != "-" ] && [ "$tflag" = "-" ]; then
+      t_exec zfs set shive:important="$w" "$n" && log "flag synced -> $n"
+    elif [ "$w" = "-" ] && [ "$tflag" != "-" ]; then
+      t_exec zfs inherit shive:important "$n" && log "flag cleared -> $n"
+    fi
+  done < <(t_exec zfs list -H -o name,shive:important -t snapshot -d 1 "$tds" 2>/dev/null | (grep "$PREFIX" || true))
+}
+
+# success: refresh the bookmark on every dataset of the tree so the base survives source pruning
+if [ "$DRY_RUN" != 1 ]; then
+  if [ $REC = 1 ]; then
+    for d in $(zfs list -H -r -o name "$SRC_DS"); do sync_flags "$d" "$T_DS${d#$SRC_DS}"; done
+  else
+    sync_flags "$SRC_DS" "$T_DS"
+  fi
+fi
+if [ "$DRY_RUN" != 1 ]; then
+  for d in $( [ $REC = 1 ] && zfs list -H -r -o name "$SRC_DS" || echo "$SRC_DS" ); do
+    zfs destroy "$d#$BM_NAME" >/dev/null 2>&1 || true
+    zfs bookmark "$d@$SNAP" "$d#$BM_NAME" || log "WARN: could not create bookmark $d#$BM_NAME"
+  done
+  log "bookmark #$BM_NAME -> $SNAP"
+fi
+exit 0

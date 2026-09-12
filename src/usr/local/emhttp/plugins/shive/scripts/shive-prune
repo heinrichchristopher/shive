@@ -1,0 +1,53 @@
+#!/bin/bash
+# shive-prune – apply retention for one schedule at one location.
+#   shive-prune --sched <name> --location source|local|remote --dataset <ds>
+#               [--target <ssh spec>] [--recursive] [--dry-run] [--json]
+# Only snapshots named shive-<hex>-* (hex = schedule id) are ever considered. Classification
+# (age/GFS, protection of newest) happens in include/retention.php.
+set -uo pipefail
+source "$(dirname "$0")/lib/common.sh"
+load_cfg
+
+SCHED=""; LOC=""; DS=""; TARGET=""; REC=0; JSON=0
+while [ $# -gt 0 ]; do case "$1" in
+  --sched) SCHED="$2"; shift 2;; --location) LOC="$2"; shift 2;; --dataset) DS="$2"; shift 2;;
+  --target) TARGET="$2"; shift 2;; --recursive) REC=1; shift;; --dry-run) DRY_RUN=1; shift;; --json) JSON=1; shift;;
+  *) die "unknown option $1";; esac; done
+[ -n "$SCHED" ] && [ -n "$LOC" ] && [ -n "$DS" ] || die "usage: shive-prune --sched --location --dataset"
+
+SCHED_JSON=$(sched_json "$SCHED") || die "schedule not found"
+POLICY=$(sq "$SCHED_JSON" ".retention.$LOC")
+[ "$POLICY" != null ] || die "no retention policy for location $LOC"
+[ -n "$TARGET" ] && t_parse "$TARGET" || t_parse "local:$DS"
+
+RFLAG=""; [ $REC = 1 ] && RFLAG="-r"
+PREFIX=$(sq "$SCHED_JSON" .tag_prefix)
+# name<TAB>creation-epoch, only our own tag
+# grep exits 1 on zero matches (a perfectly normal case: nothing of ours here yet) -
+# neutralize that so pipefail doesn't misreport an empty result as a failure.
+PLAN=$(t_exec zfs list -H -p -o name,creation,shive:important -t snapshot -d 1 "$DS" 2>/dev/null \
+        | sed 's/^[^@]*@//' | (grep "^${PREFIX}" || true) \
+        | $SHIVE_CLI retention --policy "$POLICY") || die "retention classification failed"
+
+[ $JSON = 1 ] && { echo "$PLAN"; exit 0; }
+# Recursive schedules: a child snapshot whose parent-level twin is gone (manual non-recursive
+# delete, or an interrupted destroy) would otherwise never be seen again - retention only
+# classifies the top level. Sweep them now so they cannot accumulate.
+if [ $REC = 1 ] && [ "$DRY_RUN" != 1 ]; then
+  parent_snaps=$(t_exec zfs list -H -o name -t snapshot -d 1 "$DS" 2>/dev/null | sed 's/^[^@]*@//' | (grep "^${PREFIX}" || true))
+  while IFS= read -r child; do
+    [ -n "$child" ] || continue
+    sn="${child#*@}"
+    printf '%s\n' "$parent_snaps" | grep -qx "$sn" && continue
+    [ "$(t_exec zfs get -H -o value shive:important "$child" 2>/dev/null)" = 1 ] && continue
+    t_exec zfs destroy "$child" && log "swept orphaned child snapshot $child" || log "orphan sweep failed: $child"
+  done < <(t_exec zfs list -H -o name -t snapshot -r "$DS" 2>/dev/null | grep -v "^$DS@" | grep "@${PREFIX}" || true)
+fi
+n=$(jq '.destroy|length' <<<"$PLAN"); k=$(jq '.keep|length' <<<"$PLAN")
+log "prune $LOC $DS: keep $k, destroy $n ($(jq -r '.policy_summary' <<<"$PLAN"))"
+rc=0
+for s in $(jq -r '.destroy[]' <<<"$PLAN"); do
+  if [ "$DRY_RUN" = 1 ]; then log "DRY-RUN: zfs destroy $RFLAG $DS@$s"
+  else t_exec zfs destroy $RFLAG "$DS@$s" && log "destroyed $DS@$s" || { log "destroy failed: $DS@$s"; rc=1; }; fi
+done
+exit $rc

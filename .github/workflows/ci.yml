@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y shellcheck php-cli libxml2-utils nodejs jq
+      - name: PHP syntax
+        run: find src -name '*.php' -o -name '*.page' | xargs -n1 php -l
+      - name: Shell syntax
+        run: |
+          for f in src/usr/local/emhttp/plugins/shive/scripts/shive-* \
+                   src/usr/local/emhttp/plugins/shive/scripts/lib/*.sh \
+                   src/usr/local/emhttp/plugins/shive/event/*; do bash -n "$f"; done
+      - name: shellcheck
+        run: |
+          shellcheck -S error -x src/usr/local/emhttp/plugins/shive/scripts/shive-* \
+                                 src/usr/local/emhttp/plugins/shive/scripts/lib/*.sh \
+                                 src/usr/local/emhttp/plugins/shive/event/*
+      - name: JavaScript syntax
+        run: for f in src/usr/local/emhttp/plugins/shive/js/*.js; do node -e "new Function(require('fs').readFileSync('$f','utf8'))"; done
+      - name: .plg is well-formed XML
+        run: xmllint --noout shive.plg
+
+  test:
+    runs-on: ubuntu-latest
+    container: ubuntu:24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: |
+          apt-get update
+          apt-get install -y php-cli jq rsync python3 bash coreutils findutils procps
+      - name: Regression suite (simulator, no ZFS required)
+        run: bash test/run.sh

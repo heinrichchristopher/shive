@@ -1,0 +1,52 @@
+#!/bin/bash
+# shive-recover – safety net: resume containers left stopped by a run that died
+# without reaching finalize (kill -9, OOM, power loss inside one boot), and clean
+# up expired restore clones. Idempotent; runs at array start, plugin install,
+# before every job, and on every Shive GUI page load.
+set -uo pipefail
+source "$(dirname "$0")/lib/common.sh"
+load_cfg
+QUIET=0; [ "${1:-}" = --quiet ] && QUIET=1
+exec 7>"$SHIVE_VAR/locks/recover.lock"; flock -n 7 || exit 0     # another recover is already at it
+source "$(dirname "$0")/lib/guard-docker.sh"
+for f in "$SHIVE_VAR"/state/*.json; do
+  [ -f "$f" ] || continue
+  case "$f" in *.done.json|*.recovered.json) continue;; esac
+  pid=$(jq -r '.pid' "$f"); ph=$(jq -r '.phase' "$f")
+  [ "$ph" = DONE ] && continue
+  kill -0 "$pid" 2>/dev/null && continue            # still running – leave it alone
+  # shellcheck disable=SC2034  # STATE_FILE/LOG_FILE are read by state_* and log() in common.sh
+  STATE_FILE="$f"; KEY=$(basename "$f" .json); SCHED=$(jq -r .schedule "$f")
+  # shellcheck disable=SC2034
+  LOG_FILE=$(jq -r '.log // empty' "$f")
+  # .schedule holds the run's state key (a schedule id, optionally .send-local/.send-remote) -
+  # resolve it back to a display name for the human-facing notification text.
+  SCHED_NAME=$($SHIVE_CLI schedule-get "${SCHED%%.send-*}" 2>/dev/null | jq -r '.name // empty')
+  [ -n "$SCHED_NAME" ] || SCHED_NAME="$SCHED (deleted)"
+  log "found dead run (pid $pid, phase $ph) - recovering"
+  if [ "$(state_get .quiesced)" = true ] && [ "$(state_get .resumed)" != true ]; then
+    if guard_resume; then notify warning "Shive [$SCHED_NAME]: recovered" "A previous run died in phase $ph; its containers were restarted."
+    else notify alert "Shive [$SCHED_NAME]: container resume FAILED" "Run died in phase $ph and containers could not be restarted: $(state_get '.resume_failed|join(", ")')" "Shive: container resume FAILED"; fi
+  fi
+  state_set '.status="crashed" | .finished=$t' --arg t "$(date -Is)"
+  jq '{schedule,started,finished,status,snapshot,containers:[.containers[]|.name],resume_failed:(.resume_failed//[]),sends,errors:(.errors+["run died in phase "+.phase]),warnings,log}' \
+    "$f" > "$SHIVE_PLG/state/$KEY.last.json" 2>/dev/null
+  mv "$f" "${f%.json}.recovered.json"
+done
+"$SHIVE_EMHTTP/scripts/shive-restore" unstage --all-expired >/dev/null 2>&1 || true
+
+# Housekeeping. Both of these live in RAM and so are wiped by a reboot, but nothing bounded them
+# within a single uptime: an hourly schedule produces 24 run logs and 24 retired state files per
+# day per location, which on a server that stays up for months is a slow, pointless climb.
+# Keep the recent ones (that's what the History tab shows anyway) and drop the rest.
+LOG_KEEP="${LOG_KEEP_PER_SCHEDULE:-200}"
+for d in "$LOG_DIR"/*/; do
+  [ -d "$d" ] || continue
+  ls -1t "$d"*.log 2>/dev/null | tail -n +$((LOG_KEEP + 1)) | while read -r old; do rm -f "$old"; done
+done
+# retired run state (.done.json / .recovered.json) is only read by a human debugging a past run
+ls -1t "$SHIVE_VAR"/state/*.done.json "$SHIVE_VAR"/state/*.recovered.json 2>/dev/null \
+  | tail -n +51 | while read -r old; do rm -f "$old"; done
+
+[ $QUIET = 1 ] || $SHIVE_CLI status-rebuild >/dev/null 2>&1 || true
+exit 0

@@ -1,0 +1,78 @@
+Menu="Shive:1"
+Title="Schedules"
+Tabs="true"
+Markdown="false"
+---
+<?php require_once '/usr/local/emhttp/plugins/shive/include/head.php'; ?>
+<div class="shive" id="shive-schedules" data-csrf="<?=htmlspecialchars(shive_csrf_token(), ENT_QUOTES)?>">
+  <div class="TableContainer">
+  <table class="tablesorter shift shive-table">
+    <thead><tr><th>Schedule</th><th>Tag</th><th>Datasets</th><th>Frequency</th><th>Docker</th><th>Local target</th><th>Remote target</th><th>Last run</th><th>Actions</th></tr></thead>
+    <tbody id="sched-rows"><tr><td colspan="9">loading…</td></tr></tbody>
+  </table>
+  </div>
+  <p><span class="buttons-spaced"><input type="button" value="Add schedule" onclick="Shive.sched.edit()"> <input type="button" value="Refresh" onclick="Shive.sched.load()"></span></p>
+
+  <div id="sched-editor" class="shive-panel" style="display:none">
+    <h3 id="sched-editor-title">New schedule</h3>
+    <dl><dt>Name</dt><dd><input type="text" id="f-name" maxlength="64" placeholder="e.g. Nightly appdata backup" style="width:24rem"> <span class="shive-hint">Free text, up to 64 characters. Just a label – a fixed hex ID is assigned on save and used for everything else.</span></dd></dl>
+    <dl><dt>Enabled</dt><dd><span><label><input type="checkbox" id="f-enabled" checked> run this schedule</label></span></dd></dl>
+    <dl><dt>Datasets</dt><dd><input type="text" id="f-ds-filter" placeholder="filter…" style="width:24rem" oninput="Shive.sched.filterDs()"><div id="f-datasets" class="shive-dslist"></div><span id="f-ds-count" class="shive-hint"></span><br><label><input type="checkbox" id="f-recursive" checked> include child datasets (recursive snapshot)</label></dd></dl>
+    <dl><dt>Frequency</dt><dd>
+      <select id="f-frequency" onchange="Shive.sched.freqUI()"><option value="hourly">Hourly</option><option value="daily" selected>Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option><option value="custom">Custom cron</option></select>
+      <span id="f-time-wrap"> at <input type="time" id="f-time" value="03:00"></span>
+      <span id="f-weekday-wrap" style="display:none"> on <select id="f-weekday"><option value="0">Sunday</option><option value="1">Monday</option><option value="2">Tuesday</option><option value="3">Wednesday</option><option value="4">Thursday</option><option value="5">Friday</option><option value="6">Saturday</option></select></span>
+      <span id="f-monthday-wrap" style="display:none"> on day <input type="number" id="f-monthday" min="1" max="28" value="1" style="width:4rem"></span>
+      <span id="f-cron-wrap" style="display:none"> <input type="text" id="f-cron" placeholder="*/6 * * * *" style="width:12rem"></span>
+    </dd></dl>
+    <dl><dt>Docker awareness</dt><dd><span class="shive-row"><label><input type="checkbox" id="f-docker"> stop linked containers before the snapshot, restart right after</label></span>
+  <span class="shive-row"><input type="button" value="Show linked containers" onclick="Shive.sched.showLinked()"></span>
+  <span id="f-linked" class="shive-hint"></span></dd></dl>
+    <dl><dt>Local backup target</dt><dd>
+  <span class="shive-row"><label><input type="checkbox" id="f-local-on"> enabled</label>
+    <input type="text" id="f-local-ds" list="f-local-ds-list" placeholder="pool/dataset" style="width:18rem" onblur="Shive.sched.checkParent('local')">
+    <datalist id="f-local-ds-list"></datalist></span>
+  <span id="f-local-parent-hint" class="shive-hint" style="display:none"></span>
+  <span class="shive-row"><label><input type="checkbox" id="f-local-own" onchange="Shive.sched.sendUI('local')"> own send schedule</label>
+    <span id="f-local-sched" style="display:none">
+      <select id="f-local-frequency" onchange="Shive.sched.sendUI('local')"><option value="hourly">Hourly</option><option value="daily" selected>Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option><option value="custom">Custom cron</option></select>
+      <span id="f-local-time-wrap">at <input type="time" id="f-local-time" value="04:00"></span>
+      <span id="f-local-weekday-wrap" style="display:none">on <select id="f-local-weekday"><option value="0">Sunday</option><option value="1">Monday</option><option value="2">Tuesday</option><option value="3">Wednesday</option><option value="4">Thursday</option><option value="5">Friday</option><option value="6">Saturday</option></select></span>
+      <span id="f-local-monthday-wrap" style="display:none">on day <input type="number" id="f-local-monthday" min="1" max="28" value="1" style="width:4rem"></span>
+      <span id="f-local-cron-wrap" style="display:none"><input type="text" id="f-local-cron" placeholder="0 4 * * 0" style="width:10rem"></span>
+    </span></span>
+  <span class="shive-hint">enter the <b>root</b> dataset for backups on this pool, e.g. <code>pool/backups</code> - not the exact destination. Each source dataset is placed underneath automatically as <code>&lt;root&gt;/&lt;basename&gt;</code>, so one root can hold several schedules' backups side by side. Received via <code>zfs send -I</code>. Without an own schedule the send runs right after each snapshot.</span></dd></dl>
+    <dl><dt>Remote backup target (SSH)</dt><dd>
+  <span class="shive-row"><label><input type="checkbox" id="f-remote-on"> enabled</label>
+    <span class="shive-nowrap"><input type="text" id="f-remote-user" placeholder="root" style="width:6rem">@<input type="text" id="f-remote-host" placeholder="nas.lan" style="width:11rem">:<input type="number" id="f-remote-port" value="22" style="width:5rem">/<input type="text" id="f-remote-ds" placeholder="pool/dataset" style="width:16rem" onblur="Shive.sched.checkParent('remote')"></span></span>
+  <span class="shive-row"><input type="button" value="Test connection" onclick="Shive.sched.testRemote()"></span>
+  <span id="f-remote-parent-hint" class="shive-hint" style="display:none"></span>
+  <span class="shive-row"><label><input type="checkbox" id="f-remote-own" onchange="Shive.sched.sendUI('remote')"> own send schedule</label>
+    <span id="f-remote-sched" style="display:none">
+      <select id="f-remote-frequency" onchange="Shive.sched.sendUI('remote')"><option value="hourly">Hourly</option><option value="daily">Daily</option><option value="weekly" selected>Weekly</option><option value="monthly">Monthly</option><option value="custom">Custom cron</option></select>
+      <span id="f-remote-time-wrap">at <input type="time" id="f-remote-time" value="04:00"></span>
+      <span id="f-remote-weekday-wrap">on <select id="f-remote-weekday"><option value="0">Sunday</option><option value="1">Monday</option><option value="2">Tuesday</option><option value="3">Wednesday</option><option value="4">Thursday</option><option value="5">Friday</option><option value="6">Saturday</option></select></span>
+      <span id="f-remote-monthday-wrap" style="display:none">on day <input type="number" id="f-remote-monthday" min="1" max="28" value="1" style="width:4rem"></span>
+      <span id="f-remote-cron-wrap" style="display:none"><input type="text" id="f-remote-cron" placeholder="0 4 * * 0" style="width:10rem"></span>
+    </span></span>
+  <span id="f-remote-result" class="shive-hint"></span>
+  <span class="shive-hint">same root convention as the local target above: enter the root dataset on the remote pool, e.g. <code>pool/backups</code>; each source dataset is placed underneath as <code>&lt;root&gt;/&lt;basename&gt;</code>.</span></dd></dl>
+    <dl><dt>Retention</dt><dd>
+      <table class="shive-retention"><thead><tr><th></th><th>Mode</th><th>Age (days)</th><th>Hourly</th><th>Daily</th><th>Weekly</th><th>Monthly</th></tr></thead><tbody>
+      <?php foreach (['source'=>'Source','local'=>'Local target','remote'=>'Remote target'] as $k=>$l): ?>
+      <tr><td><?=$l?></td><td><select id="f-ret-<?=$k?>-mode" onchange="Shive.sched.retUI('<?=$k?>')"><option value="gfs">GFS</option><option value="age">Age</option></select></td>
+      <td class="ret-age-<?=$k?>"><input type="number" id="f-ret-<?=$k?>-days" value="30" min="0"></td>
+      <td class="ret-gfs-<?=$k?>"><input type="number" id="f-ret-<?=$k?>-hourly" value="0" min="0"></td>
+      <td class="ret-gfs-<?=$k?>"><input type="number" id="f-ret-<?=$k?>-daily" value="7" min="0"></td>
+      <td class="ret-gfs-<?=$k?>"><input type="number" id="f-ret-<?=$k?>-weekly" value="4" min="0"></td>
+      <td class="ret-gfs-<?=$k?>"><input type="number" id="f-ret-<?=$k?>-monthly" value="3" min="0"></td></tr>
+      <?php endforeach; ?>
+      </tbody></table>
+      <span class="shive-hint"><b>GFS</b> keeps the newest snapshot of each of the last N hours / days / ISO weeks / months <em>that contain snapshots</em> (by ZFS creation time) – tiers count buckets, not elapsed time. Hourly only makes sense for hourly (or more frequent) schedules: on a daily schedule "24 hourly" would keep 24 daily snapshots.<br><b>Age</b> deletes everything older than N days.<br>The newest snapshot is always kept, whichever mode is used.</span>
+    </dd></dl>
+    <dl><dt>Advanced</dt><dd>exclude properties on receive: <input type="text" id="f-excl" value="mountpoint,canmount,sharenfs,sharesmb" style="width:24rem"><br><label><input type="checkbox" id="f-notify" checked> notify on success</label></dd></dl>
+    <dl><dt>&nbsp;</dt><dd><span class="buttons-spaced"><input type="button" value="Save" onclick="Shive.sched.save()"> <input type="button" value="Cancel" onclick="$('#sched-editor').hide()"></span> <span id="sched-errors" class="shive-err"></span></dd></dl>
+  </div>
+  <div id="prune-preview" class="shive-panel" style="display:none"></div>
+</div>
+<script>$(function(){ Shive.sched.init(); });</script>
