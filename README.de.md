@@ -18,6 +18,12 @@ GFS-Regel auf, stoppt auf Wunsch die Docker-Container, deren Daten auf den Datas
 repliziert auf einen zweiten lokalen Pool und/oder einen SSH-Host und lässt einzelne Dateien
 oder ganze Datasets aus der WebGUI zurückholen.
 
+**Entwicklung.** Entstanden in enger Zusammenarbeit mit Claude (Anthropic). Architekturentscheidungen,
+sämtliche Tests auf echter Hardware (eine produktive Unraid-7.3.2-Box mit echten ZFS-Pools und
+Docker-Containern) sowie jede Design- und Sicherheitsentscheidung lagen bei mir; Claude hat den
+Code unter dieser Anleitung geschrieben, eine 109 Prüfungen umfassende Regressionssuite gegen
+einen zustandsbehafteten Simulator laufen lassen und sechs eigene QC-Runden durchgeführt.
+
 ---
 
 ## Inhalt
@@ -339,10 +345,12 @@ shive-discover [--refresh]
 | `/boot/config/plugins/shive/used_ids` | vergebene IDs (nie wiederverwendet) |
 | `/boot/config/plugins/shive/shive.cron` | erzeugte Cron-Zeilen |
 | `/var/local/shive/` | Laufzeitzustand, Locks, Discovery-Cache (flüchtig) |
-| `/var/log/shive/<id>/` | Logs je Lauf (flüchtig, Pfad umstellbar) |
+| `/var/log/shive/<id>/` | Logs je Lauf (flüchtig, Pfad umstellbar), begrenzt auf die neuesten 200 je Zeitplan |
 
 Alles Dauerhafte liegt auf dem USB-Stick und übersteht Neustarts; Laufzeitkram liegt bewusst im
-RAM, um Schreibzugriffe auf den Stick gering zu halten.
+RAM, um Schreibzugriffe auf den Stick gering zu halten. Ausgediente Status-Dateien werden aus
+demselben Grund auf die neuesten 50 begrenzt – beide Grenzen setzt `shive-recover`, das ohnehin
+regelmäßig läuft.
 
 ---
 
