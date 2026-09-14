@@ -97,7 +97,7 @@ Aufbewahrungsregeln. Mehrere unabhängige Zeitpläne sind möglich.
 
 | Einstellung | Bedeutung |
 |---|---|
-| **Datasets** | Mehrfachauswahl mit Filterfeld. Optional rekursiv, dann werden Kind-Datasets in denselben, zeitgleichen Snapshot einbezogen. |
+| **Datasets** | Mehrfachauswahl mit Filterfeld. Optional rekursiv, dann werden Kind-Datasets in denselben, zeitgleichen Snapshot einbezogen. Einzelne Kind-Datasets lassen sich davon ausnehmen (siehe unten). |
 | **Frequenz** | stündlich, täglich, wöchentlich, monatlich oder eigener Cron-Ausdruck |
 | **Name** | freier Beschreibungstext bis 64 Zeichen, jederzeit änderbar – Schrägstriche, Umlaute und Sonderzeichen sind erlaubt, z. B. `pin/kilderkin – Daten`. Namen müssen nicht eindeutig sein. |
 | **Aktiv** | deaktivierte Zeitpläne erzeugen keinen Cron-Eintrag |
@@ -105,6 +105,27 @@ Aufbewahrungsregeln. Mehrere unabhängige Zeitpläne sind möglich.
 Die Cron-Einträge werden bei jedem Speichern komplett neu erzeugt – doppelte Einträge kann es
 dadurch nicht geben. Umbenennen verschiebt nur die Zeitplan-Datei; Verlauf, Logs und
 Cron-Eintrag bleiben unverändert, weil sie an der ID hängen und nicht am Namen.
+
+### Ausnahmen
+
+Bei rekursiven Zeitplänen lassen sich einzelne Kind-Datasets ausnehmen – nützlich für große,
+jederzeit wiederbeschaffbare Daten wie heruntergeladene Modelle oder Caches. Zwei Ebenen:
+
+- **Vom Snapshot ausnehmen** – das Dataset bekommt gar keinen Snapshot. Spart Platz auf der
+  Quelle, es gibt dann aber auch keinen lokalen Rückfallpunkt dafür.
+- **Zusätzlich beim Senden überspringen**, je Ziel getrennt – der Snapshot wird normal angelegt
+  (lokaler Rückfallpunkt bleibt), nur dieses Ziel bekommt ihn nicht. Typischer Fall: auf der
+  schnellen lokalen SSD mitnehmen, aber nicht über die Leitung zum Remote schicken.
+
+Die Ziel-Listen sind **additiv** zu den Snapshot-Ausnahmen: Was gar keinen Snapshot hat, kann
+ohnehin nirgends hin repliziert werden. Eine Ausnahme schließt immer auch alles darunter mit ein.
+Zur Auswahl stehen nur tatsächlich vorhandene Kind-Datasets der gewählten Quellen – ein Tippfehler
+würde sonst stillschweigend gar nichts ausschließen.
+
+Technisch: Da `zfs snapshot -r` keine Ausnahmen kennt, übergibt Shive bei Ausnahmen alle
+gewünschten Datasets in **einem** `zfs snapshot`-Aufruf – diese Form ist ebenfalls atomar, alle
+Datasets behalten also denselben Zeitpunkt. Beim Senden entfällt aus demselben Grund `-R`; jedes
+Dataset wird einzeln übertragen (Eltern vor Kindern), inkrementell wie gehabt.
 
 ### Snapshot-Benennung und Schedule-ID
 

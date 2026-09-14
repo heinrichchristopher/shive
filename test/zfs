@@ -79,12 +79,19 @@ if cmd == 'list':
     if '-S' in f: rows.sort(key=lambda r: r[f['-S']], reverse=True)
     for r in rows: print('\t'.join(str(r.get(c,'-')) for c in cols))
 elif cmd == 'snapshot':
+    # real zfs accepts several snapshot names in one call and creates them atomically -
+    # that is what shive uses to honour exclusions while keeping one point in time
     f, rest = flags(a[1:], [])
-    dsn, sn = rest[0].split('@')
-    if dsn not in s['ds']: die('no such dataset')
-    for n in (children(s, dsn) if '-r' in f else [dsn]):
-        if sn in s['ds'][n]['snaps']: die(f"cannot create snapshot '{n}@{sn}': dataset already exists")
-        s['ds'][n]['snaps'][sn] = tick(s); snapdir_copy(n, sn)
+    targets = []
+    for spec in rest:
+        dsn, sn = spec.split('@')
+        if dsn not in s['ds']: die(f"cannot open '{dsn}': dataset does not exist")
+        for n in (children(s, dsn) if '-r' in f else [dsn]):
+            if sn in s['ds'][n]['snaps']: die(f"cannot create snapshot '{n}@{sn}': dataset already exists")
+            targets.append((n, sn))
+    ts = tick(s)   # one timestamp for all of them: atomic, same point in time
+    for n, sn in targets:
+        s['ds'][n]['snaps'][sn] = ts; snapdir_copy(n, sn)
     save(s)
 elif cmd == 'destroy':
     f, rest = flags(a[1:], [])

@@ -541,3 +541,30 @@ rejects. `ci.yml` runs syntax checks, shellcheck at error level, .plg XML valida
 Added for publication: MIT `LICENSE`, `.gitignore` (build output stays out of the repo; packages
 are release assets), install URL and badges in both READMEs, and the release procedure documented
 in README.md.
+
+## Dataset exclusions (2026-09-14)
+
+Recursive schedules can exclude child datasets, at two levels: `exclude_datasets` on the schedule
+(no snapshot at all) and `exclude_datasets` per target (snapshot taken, just not sent there).
+Target lists are **additive** - a dataset with no snapshot cannot be replicated regardless, so a
+target can only ever subtract further. `shive_schedule_load()` derives `exclude_effective` per
+target (schedule-level ∪ target-level) so the shell side never merges the two lists itself.
+
+Implementation notes:
+- `zfs snapshot -r` has no exclude option. With exclusions, the tree is enumerated and every
+  wanted dataset passed to **one** `zfs snapshot` call - that form is atomic, so the point-in-time
+  guarantee `-r` gives is preserved. (Snapshotting them one call at a time would not be.)
+- `zfs send -R` likewise cannot skip datasets, so with exclusions each dataset is sent
+  individually, parents first (`zfs list` order), reusing the per-dataset base selection that
+  already existed for the bookmark-fallback path. **Without** exclusions the tested `-R` path is
+  used unchanged - the new code only runs when someone actually configured an exclusion.
+- Validation rejects exclusions that aren't below a source, that are a source themselves, or that
+  don't exist - an exclusion matching nothing silently excludes nothing, which is the failure mode
+  worth catching at save time. The existence check is skipped when ZFS isn't answering, so a
+  stopped array can't block saving a valid schedule.
+
+**Bug found while testing this:** picking the snapshot name before knowing which datasets are
+involved. `snap_name` only checked the first source dataset's subtree for a same-minute collision,
+but `zfs snapshot` fails the *entire batch* if any one name already exists - so a collision on a
+second source dataset, or on a tree reshaped by exclusions, failed the run. The name is now chosen
+after the dataset list is built and checked against every dataset in it.

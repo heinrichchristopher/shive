@@ -57,6 +57,12 @@ RFLAG=""; [ "$RECURSIVE" = true ] && RFLAG="-r"
 LOCAL_ON=$(sq "$SCHED_JSON" .local_target.enabled);  LOCAL_DS=$(sq "$SCHED_JSON" .local_target.dataset)
 REMOTE_ON=$(sq "$SCHED_JSON" .remote_target.enabled); REMOTE_SPEC=$(sq "$SCHED_JSON" .remote_target.spec)
 EXCL=$(sq "$SCHED_JSON" '.exclude_props|join(",")')
+mapfile -t EXCLUDE_SNAP   < <(sq "$SCHED_JSON" '.exclude_datasets[]?')
+mapfile -t EXCLUDE_LOCAL  < <(sq "$SCHED_JSON" '.local_target.exclude_effective[]?')
+mapfile -t EXCLUDE_REMOTE < <(sq "$SCHED_JSON" '.remote_target.exclude_effective[]?')
+[ ${#EXCLUDE_SNAP[@]}   -gt 0 ] && log "snapshot exclusions: ${EXCLUDE_SNAP[*]}"
+[ ${#EXCLUDE_LOCAL[@]}  -gt 0 ] && log "local send exclusions: ${EXCLUDE_LOCAL[*]}"
+[ ${#EXCLUDE_REMOTE[@]} -gt 0 ] && log "remote send exclusions: ${EXCLUDE_REMOTE[*]}"
 SEND_LOCAL=$LOCAL_ON; SEND_REMOTE=$REMOTE_ON
 [ $NO_SEND = 1 ] && { SEND_LOCAL=false; SEND_REMOTE=false; }
 [ $SKIP_LOCAL = 1 ] && SEND_LOCAL=false
@@ -190,10 +196,48 @@ guard_quiesce || { add_error "quiesce failed - aborting before snapshot (contain
 
 # ---- SNAPSHOT ---------------------------------------------------------------
 phase SNAPSHOT
-SNAP=$(snap_name "$PREFIX" "${DATASETS[0]}" "$( [ "$RECURSIVE" = true ] && echo 1 || echo 0 )")
-for ds in "${DATASETS[@]}"; do
-  run_cmd zfs snapshot $RFLAG "$ds@$SNAP" || { add_error "snapshot of $ds failed"; exit 1; }
+# Work out exactly which datasets get a snapshot BEFORE picking the name, so the same-minute
+# collision check can look at all of them. Checking only the first source's subtree (as this used
+# to) misses a collision on a second source dataset, or on a tree whose shape changed because of
+# exclusions - and `zfs snapshot` fails the whole batch if any single name already exists.
+SNAP_DATASETS=()
+if [ "$RECURSIVE" = true ] && [ ${#EXCLUDE_SNAP[@]} -gt 0 ]; then
+  for ds in "${DATASETS[@]}"; do
+    while IFS= read -r d; do
+      [ -n "$d" ] || continue
+      is_excluded "$d" "${EXCLUDE_SNAP[@]}" && { log "excluded from snapshot: $d"; continue; }
+      SNAP_DATASETS+=("$d")
+    done < <(zfs list -H -r -o name "$ds" 2>/dev/null)
+  done
+  [ ${#SNAP_DATASETS[@]} -gt 0 ] || { add_error "every dataset is excluded - nothing to snapshot"; exit 1; }
+elif [ "$RECURSIVE" = true ]; then
+  for ds in "${DATASETS[@]}"; do
+    while IFS= read -r d; do [ -n "$d" ] && SNAP_DATASETS+=("$d"); done < <(zfs list -H -r -o name "$ds" 2>/dev/null)
+  done
+else
+  SNAP_DATASETS=("${DATASETS[@]}")
+fi
+
+SNAP="$PREFIX$(tag_now)"
+for d in "${SNAP_DATASETS[@]}"; do
+  if zfs list -H -o name "$d@$SNAP" >/dev/null 2>&1; then
+    SNAP="$SNAP-$(date +%S)"                 # same-minute collision: disambiguate by seconds
+    log "snapshot name already in use on $d - using $SNAP instead"
+    break
+  fi
 done
+
+# `zfs snapshot -r` has no exclude option, so when exclusions exist we pass every wanted dataset to
+# ONE `zfs snapshot` call - that form is still atomic, so all datasets keep the identical point in
+# time that -r would have given us.
+if [ "$RECURSIVE" = true ] && [ ${#EXCLUDE_SNAP[@]} -gt 0 ]; then
+  SNAP_TARGETS=(); for d in "${SNAP_DATASETS[@]}"; do SNAP_TARGETS+=("$d@$SNAP"); done
+  run_cmd zfs snapshot "${SNAP_TARGETS[@]}" || { add_error "snapshot failed"; exit 1; }
+else
+  for ds in "${DATASETS[@]}"; do
+    run_cmd zfs snapshot $RFLAG "$ds@$SNAP" || { add_error "snapshot of $ds failed"; exit 1; }
+  done
+fi
 state_set '.snapshot=$s' --arg s "$SNAP"
 log "snapshot $SNAP taken on ${DATASETS[*]}"
 
@@ -205,22 +249,43 @@ fi
 # ---- SEND -------------------------------------------------------------------
 # shellcheck disable=SC2046  # the $( ... && echo --flag ) idiom below relies on word splitting
 #                               to add optional arguments; the values are fixed literals
-do_send() { # <location> <target-root-spec>
-  local loc="$1" root="$2" ok=1 ds tgt
+do_send() { # <location> <target-root-spec> <excluded...>
+  local loc="$1" root="$2"; shift 2
+  local excl=("$@") ok=1 ds tgt spec
   phase "SEND_${loc^^}"
   for ds in "${DATASETS[@]}"; do
     t_parse "$root"; tgt=$(target_for "$T_DS" "$ds")
-    local spec; [ "$T_TYPE" = local ] && spec="local:$tgt" || spec="${root%/$T_DS}/$tgt"
-    if ! "$SHIVE_EMHTTP/scripts/shive-send" --sched "$SCHED_ID" --from "$ds@$SNAP" --to "$spec" \
-         $( [ "$RECURSIVE" = true ] && echo --recursive ) --exclude-props "$EXCL" $( [ $DRY_RUN = 1 ] && echo --dry-run ); then
-      add_error "$loc send of $ds failed"; ok=0
+    [ "$T_TYPE" = local ] && spec="local:$tgt" || spec="${root%/$T_DS}/$tgt"
+
+    if [ "$RECURSIVE" != true ] || [ ${#excl[@]} -eq 0 ]; then
+      # no exclusions: one -R stream for the whole tree, as before
+      if ! "$SHIVE_EMHTTP/scripts/shive-send" --sched "$SCHED_ID" --from "$ds@$SNAP" --to "$spec" \
+           $( [ "$RECURSIVE" = true ] && echo --recursive ) --exclude-props "$EXCL" $( [ $DRY_RUN = 1 ] && echo --dry-run ); then
+        add_error "$loc send of $ds failed"; ok=0
+      fi
+      continue
     fi
+
+    # `zfs send -R` cannot skip datasets, so send each one on its own. zfs list returns parents
+    # before children, so each dataset's parent already exists on the target when its turn comes.
+    local d rel child_spec
+    while IFS= read -r d; do
+      [ -n "$d" ] || continue
+      zfs list -H -o name "$d@$SNAP" >/dev/null 2>&1 || continue    # excluded from the snapshot
+      if is_excluded "$d" "${excl[@]}"; then log "excluded from $loc send: $d"; continue; fi
+      rel="${d#"$ds"}"                                             # "" for the root, "/child" below
+      [ "$T_TYPE" = local ] && child_spec="local:$tgt$rel" || child_spec="${root%/$T_DS}/$tgt$rel"
+      if ! "$SHIVE_EMHTTP/scripts/shive-send" --sched "$SCHED_ID" --from "$d@$SNAP" --to "$child_spec" \
+           --exclude-props "$EXCL" $( [ $DRY_RUN = 1 ] && echo --dry-run ); then
+        add_error "$loc send of $d failed"; ok=0
+      fi
+    done < <(zfs list -H -r -o name "$ds" 2>/dev/null)
   done
   if [ $ok = 1 ]; then state_set '.sends[$l]={status:"ok",snapshot:$s,finished:$t}' --arg l "$loc" --arg s "$SNAP" --arg t "$(date -Is)"
   else state_set '.sends[$l]={status:"failed",snapshot:$s}' --arg l "$loc" --arg s "$SNAP"; fi
 }
-[ "$SEND_LOCAL"  = true ] && do_send local  "local:$LOCAL_DS"
-[ "$SEND_REMOTE" = true ] && do_send remote "$REMOTE_SPEC"
+[ "$SEND_LOCAL"  = true ] && do_send local  "local:$LOCAL_DS" "${EXCLUDE_LOCAL[@]}"
+[ "$SEND_REMOTE" = true ] && do_send remote "$REMOTE_SPEC" "${EXCLUDE_REMOTE[@]}"
 
 # ---- PRUNE ------------------------------------------------------------------
 if [ $NO_PRUNE = 0 ]; then

@@ -17,7 +17,9 @@ Markdown="false"
     <h3 id="sched-editor-title">New schedule</h3>
     <dl><dt>Name</dt><dd><input type="text" id="f-name" maxlength="64" placeholder="e.g. Nightly appdata backup" style="width:24rem"> <span class="shive-hint">Free text, up to 64 characters. Just a label – a fixed hex ID is assigned on save and used for everything else.</span></dd></dl>
     <dl><dt>Enabled</dt><dd><span><label><input type="checkbox" id="f-enabled" checked> run this schedule</label></span></dd></dl>
-    <dl><dt>Datasets</dt><dd><input type="text" id="f-ds-filter" placeholder="filter…" style="width:24rem" oninput="Shive.sched.filterDs()"><div id="f-datasets" class="shive-dslist"></div><span id="f-ds-count" class="shive-hint"></span><br><label><input type="checkbox" id="f-recursive" checked> include child datasets (recursive snapshot)</label></dd></dl>
+    <dl><dt>Datasets</dt><dd><input type="text" id="f-ds-filter" placeholder="filter…" style="width:24rem" oninput="Shive.sched.filterDs()"><div id="f-datasets" class="shive-dslist"></div><span id="f-ds-count" class="shive-hint"></span><br><label><input type="checkbox" id="f-recursive" checked onchange="Shive.sched.excludeUI()"> include child datasets (recursive snapshot)</label>
+    <div id="f-excl-wrap"><div class="shive-dslist" id="f-exclude"></div>
+    <span class="shive-hint">Tick any child dataset to leave out of the snapshot entirely - no snapshot means nothing to replicate either. Excluding a dataset also excludes everything below it.</span></div></dd></dl>
     <dl><dt>Frequency</dt><dd>
       <select id="f-frequency" onchange="Shive.sched.freqUI()"><option value="hourly">Hourly</option><option value="daily" selected>Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option><option value="custom">Custom cron</option></select>
       <span id="f-time-wrap"> at <input type="time" id="f-time" value="03:00"></span>
@@ -41,6 +43,9 @@ Markdown="false"
       <span id="f-local-monthday-wrap" style="display:none">on day <input type="number" id="f-local-monthday" min="1" max="28" value="1" style="width:4rem"></span>
       <span id="f-local-cron-wrap" style="display:none"><input type="text" id="f-local-cron" placeholder="0 4 * * 0" style="width:10rem"></span>
     </span></span>
+  <span class="shive-row"><span>additionally skip when sending here:</span></span>
+  <div class="shive-dslist" id="f-local-exclude"></div>
+  <span class="shive-hint">adds to the snapshot exclusions above - useful for large, re-downloadable data you want a local snapshot of but no copy on this target.</span>
   <span class="shive-hint">enter the <b>root</b> dataset for backups on this pool, e.g. <code>pool/backups</code> - not the exact destination. Each source dataset is placed underneath automatically as <code>&lt;root&gt;/&lt;basename&gt;</code>, so one root can hold several schedules' backups side by side. Received via <code>zfs send -I</code>. Without an own schedule the send runs right after each snapshot.</span></dd></dl>
     <dl><dt>Remote backup target (SSH)</dt><dd>
   <span class="shive-row"><label><input type="checkbox" id="f-remote-on"> enabled</label>
@@ -56,6 +61,8 @@ Markdown="false"
       <span id="f-remote-cron-wrap" style="display:none"><input type="text" id="f-remote-cron" placeholder="0 4 * * 0" style="width:10rem"></span>
     </span></span>
   <span id="f-remote-result" class="shive-hint"></span>
+  <span class="shive-row"><span>additionally skip when sending here:</span></span>
+  <div class="shive-dslist" id="f-remote-exclude"></div>
   <span class="shive-hint">same root convention as the local target above: enter the root dataset on the remote pool, e.g. <code>pool/backups</code>; each source dataset is placed underneath as <code>&lt;root&gt;/&lt;basename&gt;</code>.</span></dd></dl>
     <dl><dt>Retention</dt><dd>
       <table class="shive-retention"><thead><tr><th></th><th>Mode</th><th>Age (days)</th><th>Hourly</th><th>Daily</th><th>Weekly</th><th>Monthly</th></tr></thead><tbody>

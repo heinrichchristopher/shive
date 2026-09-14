@@ -98,7 +98,7 @@ independent schedules are supported.
 
 | Setting | Meaning |
 |---|---|
-| **Datasets** | Multi-select with a filter field. Optionally recursive, in which case child datasets are included in the same, simultaneous snapshot. |
+| **Datasets** | Multi-select with a filter field. Optionally recursive, in which case child datasets are included in the same, simultaneous snapshot. Individual child datasets can be excluded from that (see below). |
 | **Frequency** | hourly, daily, weekly, monthly, or a custom cron expression |
 | **Name** | free-form text up to 64 characters, changeable any time - slashes, umlauts and special characters are fine, e.g. `pin/kilderkin – data`. Names need not be unique. |
 | **Enabled** | disabled schedules produce no cron entry |
@@ -106,6 +106,27 @@ independent schedules are supported.
 Cron entries are regenerated in full on every save, so duplicates cannot occur. Renaming only
 moves the schedule file; history, logs and the cron entry stay put, because they're keyed by the
 ID, not the name.
+
+### Exclusions
+
+Recursive schedules can leave individual child datasets out - useful for large, re-downloadable
+data such as model files or caches. Two levels:
+
+- **Exclude from the snapshot** - the dataset gets no snapshot at all. Saves space on the source,
+  but leaves you without a local restore point for it.
+- **Additionally skip when sending**, configured per target - the snapshot is still taken (local
+  restore point intact), only that target doesn't receive it. Typical case: keep it on the fast
+  local SSD, but don't push it over the wire to the remote.
+
+The per-target lists are **additive** to the snapshot exclusions: something that never gets a
+snapshot can't be replicated anywhere anyway. Excluding a dataset always excludes everything
+below it too. Only child datasets that actually exist under the selected sources are offered -
+otherwise a typo would silently exclude nothing.
+
+Under the hood: since `zfs snapshot -r` has no exclude option, Shive passes every wanted dataset
+to a single `zfs snapshot` call when exclusions are in play - that form is atomic too, so all
+datasets keep the identical point in time. Sending drops `-R` for the same reason and transfers
+each dataset on its own (parents before children), incrementally as before.
 
 ### Snapshot naming and schedule ID
 

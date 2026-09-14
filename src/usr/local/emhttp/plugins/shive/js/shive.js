@@ -64,7 +64,26 @@ var Shive = (function () {
     },
     selectedDs: function () { return $('.f-ds:checked').map(function () { return this.value; }).get(); },
     setDs: function (list) { $('.f-ds').each(function () { this.checked = list.indexOf(this.value) >= 0; }); sched.dsCount(); },
-    dsCount: function () { var n = sched.selectedDs().length; $('#f-ds-count').text(n ? n + ' selected: ' + sched.selectedDs().join(', ') : 'none selected'); },
+    dsCount: function () { var n = sched.selectedDs().length; $('#f-ds-count').text(n ? n + ' selected: ' + sched.selectedDs().join(', ') : 'none selected'); sched.excludeUI(); },
+    // Only children of the selected sources can be excluded - anything else would be a typo the
+    // backend rejects anyway, so don't offer it. Keeps ticks that are still valid after a change.
+    excludeUI: function () {
+      var srcs = sched.selectedDs(), rec = $('#f-recursive').is(':checked');
+      var children = datasets.map(function (d) { return d.name; }).filter(function (n) {
+        return srcs.some(function (s) { return n !== s && n.indexOf(s + '/') === 0; });
+      });
+      $('#f-excl-wrap').toggle(rec && children.length > 0);
+      ['f-exclude', 'f-local-exclude', 'f-remote-exclude'].forEach(function (id) {
+        var was = $('#' + id + ' input:checked').map(function () { return this.value; }).get();
+        $('#' + id).html(children.map(function (n) {
+          return '<label><input type="checkbox" value="' + esc(n) + '"' + (was.indexOf(n) >= 0 ? ' checked' : '') + '>' + esc(n) + '</label>';
+        }).join('') || '<span class="shive-hint">no child datasets</span>');
+      });
+    },
+    excluded: function (id) { return $('#' + id + ' input:checked').map(function () { return this.value; }).get(); },
+    setExcluded: function (id, list) {
+      $('#' + id + ' input').each(function () { this.checked = (list || []).indexOf(this.value) >= 0; });
+    },
     filterDs: function () { var q = $('#f-ds-filter').val().toLowerCase(); $('#f-datasets label').each(function () { $(this).toggle(!q || $(this).data('name').toLowerCase().indexOf(q) >= 0); }); },
     // show only the fields the selected mode actually uses (backend ignores the others anyway)
     retUI: function (loc) {
@@ -97,6 +116,10 @@ var Shive = (function () {
       $('#f-ds-filter').val(''); sched.filterDs(); sched.setDs(s ? s.datasets : []); $('#f-recursive').prop('checked', s ? s.recursive : true);
       $('#f-frequency').val(s ? s.frequency : 'daily'); $('#f-time').val(s ? s.time : '03:00'); $('#f-weekday').val(s ? s.weekday : 0); $('#f-monthday').val(s ? s.monthday : 1); $('#f-cron').val(s ? s.cron : '');
       $('#f-docker').prop('checked', s ? s.docker_aware : false); $('#f-linked').text('');
+      sched.excludeUI();
+      sched.setExcluded('f-exclude', s ? s.exclude_datasets : []);
+      sched.setExcluded('f-local-exclude', s ? s.local_target.exclude_datasets : []);
+      sched.setExcluded('f-remote-exclude', s ? s.remote_target.exclude_datasets : []);
       $('#f-local-on').prop('checked', s ? s.local_target.enabled : false); $('#f-local-ds').val(s ? s.local_target.dataset : '');
       $('#f-remote-on').prop('checked', s ? s.remote_target.enabled : false);
       $('#f-remote-user').val(s ? s.remote_target.user : 'root'); $('#f-remote-host').val(s ? s.remote_target.host : ''); $('#f-remote-port').val(s ? s.remote_target.port : 22); $('#f-remote-ds').val(s ? s.remote_target.dataset : ''); $('#f-remote-result').text('');
@@ -124,11 +147,12 @@ var Shive = (function () {
       var ret = {};
       ['source', 'local', 'remote'].forEach(function (k) { ret[k] = {}; ['mode', 'days', 'hourly', 'daily', 'weekly', 'monthly'].forEach(function (f) { ret[k][f] = $('#f-ret-' + k + '-' + f).val(); }); });
       return {
-        id: $('#sched-editor').data('edit-id') || '', name: $('#f-name').val(), enabled: $('#f-enabled').is(':checked'), datasets: sched.selectedDs(), recursive: $('#f-recursive').is(':checked'),
+        id: $('#sched-editor').data('edit-id') || '', exclude_datasets: sched.excluded('f-exclude'),
+        name: $('#f-name').val(), enabled: $('#f-enabled').is(':checked'), datasets: sched.selectedDs(), recursive: $('#f-recursive').is(':checked'),
         frequency: $('#f-frequency').val(), time: $('#f-time').val(), weekday: $('#f-weekday').val(), monthday: $('#f-monthday').val(), cron: $('#f-cron').val(),
         docker_aware: $('#f-docker').is(':checked'),
-        local_target: $.extend({ enabled: $('#f-local-on').is(':checked'), dataset: $('#f-local-ds').val() }, sched.sendCfg('local')),
-        remote_target: $.extend({ enabled: $('#f-remote-on').is(':checked'), user: $('#f-remote-user').val(), host: $('#f-remote-host').val(), port: $('#f-remote-port').val(), dataset: $('#f-remote-ds').val() }, sched.sendCfg('remote')),
+        local_target: $.extend({ enabled: $('#f-local-on').is(':checked'), dataset: $('#f-local-ds').val(), exclude_datasets: sched.excluded('f-local-exclude') }, sched.sendCfg('local')),
+        remote_target: $.extend({ enabled: $('#f-remote-on').is(':checked'), user: $('#f-remote-user').val(), host: $('#f-remote-host').val(), port: $('#f-remote-port').val(), dataset: $('#f-remote-ds').val(), exclude_datasets: sched.excluded('f-remote-exclude') }, sched.sendCfg('remote')),
         retention: ret, exclude_props: $('#f-excl').val().split(','), notify_success: $('#f-notify').is(':checked')
       };
     },

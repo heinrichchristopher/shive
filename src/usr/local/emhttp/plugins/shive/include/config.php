@@ -46,11 +46,16 @@ function shive_retention_defaults(): array {
 function shive_schedule_defaults(): array {
   return [
     'name' => '', 'id' => 0, 'created' => 0, 'enabled' => true, 'datasets' => [], 'recursive' => true,
+    // child datasets to leave out of the recursive snapshot entirely (no snapshot -> nothing to send)
+    'exclude_datasets' => [],
     'frequency' => 'daily', 'time' => '03:00', 'weekday' => 0, 'monthday' => 1, 'cron' => '',
     'docker_aware' => false,
-    'local_target'  => ['enabled' => false, 'dataset' => '', 'own_schedule' => false,
+    // exclude_datasets on a target is ADDITIVE to the schedule-level list: a dataset that never
+    // gets a snapshot can't be replicated anyway, so a target can only ever exclude more, not less.
+    'local_target'  => ['enabled' => false, 'dataset' => '', 'exclude_datasets' => [], 'own_schedule' => false,
                         'frequency' => 'daily', 'time' => '04:00', 'weekday' => 0, 'monthday' => 1, 'cron' => ''],
     'remote_target' => ['enabled' => false, 'host' => '', 'port' => 22, 'user' => 'root', 'dataset' => '',
+                        'exclude_datasets' => [],
                         'own_schedule' => false, 'frequency' => 'weekly', 'time' => '04:00', 'weekday' => 0, 'monthday' => 1, 'cron' => ''],
     'retention' => ['source' => shive_retention_defaults(), 'local' => shive_retention_defaults(), 'remote' => shive_retention_defaults()],
     'exclude_props' => ['mountpoint', 'canmount', 'sharenfs', 'sharesmb'],
@@ -75,7 +80,8 @@ function shive_tag_prefix(array $s): string { return 'shive-' . $s['id'] . '-'; 
    One definition, used by every path that persists a schedule. */
 function shive_strip_derived(array $s): array {
   unset($s['tag_prefix'], $s['cron_expr'], $s['spec'],
-        $s['local_target']['cron_expr'], $s['remote_target']['cron_expr'], $s['remote_target']['spec']);
+        $s['local_target']['cron_expr'], $s['remote_target']['cron_expr'], $s['remote_target']['spec'],
+        $s['local_target']['exclude_effective'], $s['remote_target']['exclude_effective']);
   return $s;
 }
 function shive_valid_id(string $id): bool { return (bool)preg_match('/^[0-9a-f]{6}$/', $id); }
@@ -116,7 +122,10 @@ function shive_schedule_load(string $id): ?array {
   $s = array_replace_recursive(shive_schedule_defaults(), $s);
   // array_replace_recursive merges lists by index (a 1-element exclude_props would keep the
   // other three defaults) - take list fields verbatim from the file
-  foreach (['datasets', 'exclude_props'] as $k) if (isset($raw[$k]) && is_array($raw[$k])) $s[$k] = array_values($raw[$k]);
+  foreach (['datasets', 'exclude_props', 'exclude_datasets'] as $k) if (isset($raw[$k]) && is_array($raw[$k])) $s[$k] = array_values($raw[$k]);
+  foreach (['local_target', 'remote_target'] as $loc)
+    if (isset($raw[$loc]['exclude_datasets']) && is_array($raw[$loc]['exclude_datasets']))
+      $s[$loc]['exclude_datasets'] = array_values($raw[$loc]['exclude_datasets']);
   $s['id'] = $id;
   if (empty($raw['created'])) {   // pre-existing schedule from before this field: best-effort backfill
     $s['created'] = @filemtime(shive_schedule_file($id)) ?: time();
@@ -126,8 +135,13 @@ function shive_schedule_load(string $id): ?array {
   $r = $s['remote_target'];
   $s['remote_target']['spec'] = $r['host'] !== '' ? sprintf('ssh://%s@%s:%d/%s', $r['user'] ?: 'root', $r['host'], (int)($r['port'] ?: 22), $r['dataset']) : '';
   $s['cron_expr'] = shive_cron_expr($s);
-  foreach (['local_target', 'remote_target'] as $loc)
+  foreach (['local_target', 'remote_target'] as $loc) {
     $s[$loc]['cron_expr'] = $s[$loc]['own_schedule'] ? shive_cron_expr($s[$loc]) : '';
+    // effective = snapshot exclusions + this target's own (additive). Derived here so the shell
+    // side never has to merge the two lists itself and can't drift from this definition.
+    $s[$loc]['exclude_effective'] = array_values(array_unique(array_merge(
+      $s['exclude_datasets'], $s[$loc]['exclude_datasets'] ?? [])));
+  }
   return $s;
 }
 /* One-time migration: schedules used to be stored as <name>.json (and before that without an
@@ -166,6 +180,32 @@ function shive_schedule_validate(array $s): array {
   if (!shive_valid_name($s['name'] ?? '')) $e[] = 'name: 1-64 characters, no control characters';
   if (empty($s['datasets'])) $e[] = 'at least one dataset required';
   foreach ($s['datasets'] as $d) if (!$isDataset($d)) $e[] = "invalid dataset '$d'";
+  // Exclusions must be shaped like datasets AND actually sit below one of the sources - otherwise a
+  // typo silently excludes nothing, which is the failure mode you'd never notice until a restore.
+  $under = function (string $x) use ($s) {
+    foreach ($s['datasets'] as $src) if ($x === $src || str_starts_with($x, $src . '/')) return true;
+    return false;
+  };
+  $checkExcl = function (array $list, string $where) use (&$e, $isDataset, $under, $s) {
+    // Existence is only checked when ZFS is actually answering and this schedule's own sources are
+    // visible - otherwise a stopped array or an exported pool would block saving a valid schedule.
+    // zfs.php isn't a dependency of config.php, so this degrades to "no check" if it isn't loaded.
+    static $known = null;
+    if ($known === null) $known = function_exists('zfs_datasets') ? array_keys(zfs_datasets()) : [];
+    $sourcesVisible = $known && !array_diff($s['datasets'], $known);
+    foreach ($list as $x) {
+      if (!$isDataset($x)) { $e[] = "$where: invalid dataset '$x'"; continue; }
+      if (!$under($x)) { $e[] = "$where: '$x' is not below any of this schedule's source datasets"; continue; }
+      if (in_array($x, $s['datasets'], true)) { $e[] = "$where: '$x' is a source dataset itself - remove it from the sources instead"; continue; }
+      if ($sourcesVisible && !in_array($x, $known, true))
+        $e[] = "$where: '$x' does not exist - check the spelling, an exclusion that matches nothing silently excludes nothing";
+    }
+  };
+  $checkExcl($s['exclude_datasets'], 'snapshot exclusions');
+  if (!empty($s['exclude_datasets']) && empty($s['recursive']))
+    $e[] = 'snapshot exclusions only apply to a recursive schedule';
+  $checkExcl($s['local_target']['exclude_datasets'] ?? [], 'local target exclusions');
+  $checkExcl($s['remote_target']['exclude_datasets'] ?? [], 'remote target exclusions');
   if (count($s['datasets']) > 1) {
     $b = array_map(fn($d) => basename($d), $s['datasets']);
     if (count($b) !== count(array_unique($b))) $e[] = 'the last path component of each source dataset must be unique - every source is stored as <target-root>/<basename>, so identical basenames would collide in the target';
@@ -198,7 +238,10 @@ function shive_schedule_validate(array $s): array {
 }
 function shive_schedule_save(array $in): array {
   $s = array_replace_recursive(shive_schedule_defaults(), $in);
-  foreach (['datasets', 'exclude_props'] as $k) if (isset($in[$k]) && is_array($in[$k])) $s[$k] = array_values($in[$k]);   // see load()
+  foreach (['datasets', 'exclude_props', 'exclude_datasets'] as $k) if (isset($in[$k]) && is_array($in[$k])) $s[$k] = array_values($in[$k]);   // see load()
+  foreach (['local_target', 'remote_target'] as $loc)
+    if (isset($in[$loc]['exclude_datasets']) && is_array($in[$loc]['exclude_datasets']))
+      $s[$loc]['exclude_datasets'] = array_values($in[$loc]['exclude_datasets']);
   $s['name'] = trim((string)$s['name']);   // free text; only trimmed, never rewritten
   $s['datasets'] = array_values(array_unique(array_filter(array_map('trim', (array)$s['datasets']))));
   foreach (['enabled', 'recursive', 'docker_aware', 'notify_success'] as $b) $s[$b] = (bool)$s[$b];
@@ -209,6 +252,9 @@ function shive_schedule_save(array $in): array {
   $s['remote_target']['port'] = (int)$s['remote_target']['port'];
   foreach (['source', 'local', 'remote'] as $loc) foreach (['days', 'hourly', 'daily', 'weekly', 'monthly'] as $k) $s['retention'][$loc][$k] = (int)($s['retention'][$loc][$k] ?? 0);
   $s['exclude_props'] = array_values(array_filter(array_map('trim', (array)$s['exclude_props'])));
+  $s['exclude_datasets'] = array_values(array_filter(array_map('trim', (array)$s['exclude_datasets'])));
+  foreach (['local_target', 'remote_target'] as $loc)
+    $s[$loc]['exclude_datasets'] = array_values(array_filter(array_map('trim', (array)($s[$loc]['exclude_datasets'] ?? []))));
   $s = shive_strip_derived($s);
   $errors = shive_schedule_validate($s);
   if ($errors) return ['ok' => false, 'errors' => $errors];

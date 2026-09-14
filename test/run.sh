@@ -260,6 +260,64 @@ check "all sources gone is still a hard failure"          "zfs destroy -r pin/me
 zfs destroy -r minikeg/multi >/dev/null 2>&1
 php -r "require '$SRC/include/config.php'; shive_schedule_delete('$IDM');" >/dev/null 2>&1
 
+sec "dataset exclusions (snapshot-level and additive per target)"
+zfs create pin/appdata/models >/dev/null 2>&1; zfs create pin/appdata/cache >/dev/null 2>&1
+zfs create minikeg/excl >/dev/null 2>&1; zfs create tank/excl >/dev/null 2>&1
+IDE=$(php_save '["name"=>"Excl","datasets"=>["pin/appdata"],"recursive"=>true,
+  "exclude_datasets"=>["pin/appdata/models"],
+  "local_target"=>["enabled"=>true,"dataset"=>"minikeg/excl"],
+  "remote_target"=>["enabled"=>true,"host"=>"fakehost","user"=>"root","port"=>22,"dataset"=>"tank/excl","exclude_datasets"=>["pin/appdata/cache"]]]')
+$S/shive-run $IDE --no-prune >/dev/null 2>&1
+check "snapshot-excluded dataset gets no snapshot"        "! zfs list -H -t snapshot -o name -d 1 pin/appdata/models | grep -q shive-$IDE-"
+check "included children do get one"                      "zfs list -H -t snapshot -o name -d 1 pin/appdata/cache | grep -q shive-$IDE-"
+check "one atomic point in time for the whole run"        "[ \"\$(zfs list -H -p -o name,creation -t snapshot -r pin/appdata | grep shive-$IDE- | awk '{print \$2}' | sort -u | wc -l)\" = 1 ]"
+check "local target: snapshot exclusion applies"          "! zfs list -H -o name -r minikeg/excl | grep -q '/models$'"
+check "local target: keeps what only remote excludes"     "zfs list -H -o name -r minikeg/excl | grep -q '/cache$'"
+check "remote target: its own exclusion is additive"      "! zfs list -H -o name -r tank/excl | grep -qE '/(models|cache)$'"
+check "remote target still gets the rest"                 "zfs list -H -o name -r tank/excl | grep -q '/appdata$'"
+excl_save() { php -r "require '$SRC/include/config.php'; require '$SRC/include/zfs.php'; \$r=shive_schedule_save($1); echo \$r['ok']?'ok':'rejected';"; }
+check "exclusion outside the sources rejected"            "[ \"\$(excl_save '[\"name\"=>\"e1\",\"datasets\"=>[\"pin/appdata\"],\"recursive\"=>true,\"exclude_datasets\"=>[\"tank/elsewhere\"]]')\" = rejected ]"
+check "misspelled exclusion rejected (would exclude nothing)" "[ \"\$(excl_save '[\"name\"=>\"e2\",\"datasets\"=>[\"pin/appdata\"],\"recursive\"=>true,\"exclude_datasets\"=>[\"pin/appdata/modelz\"]]')\" = rejected ]"
+check "excluding a source dataset itself rejected"        "[ \"\$(excl_save '[\"name\"=>\"e3\",\"datasets\"=>[\"pin/appdata\"],\"recursive\"=>true,\"exclude_datasets\"=>[\"pin/appdata\"]]')\" = rejected ]"
+check "exclusions on a non-recursive schedule rejected"   "[ \"\$(excl_save '[\"name\"=>\"e4\",\"datasets\"=>[\"pin/appdata\"],\"recursive\"=>false,\"exclude_datasets\"=>[\"pin/appdata/cache\"]]')\" = rejected ]"
+check "effective list is derived, never persisted"        "! grep -q exclude_effective /boot/config/plugins/shive/schedules/$IDE.json"
+php -r "require '$SRC/include/config.php'; shive_schedule_delete('$IDE');" >/dev/null 2>&1
+zfs destroy -r pin/appdata/models >/dev/null 2>&1; zfs destroy -r pin/appdata/cache >/dev/null 2>&1
+zfs destroy -r minikeg/excl >/dev/null 2>&1; zfs destroy -r tank/excl >/dev/null 2>&1
+: > /tmp/notify.log
+
+sec "dataset exclusions (snapshot-level and per target, additive)"
+zfs create pin/appdata/models >/dev/null 2>&1; echo m > /mnt/pin/appdata/models/big
+zfs create minikeg/excl >/dev/null 2>&1; zfs create tank/excl >/dev/null 2>&1
+IDX=$(php_save '["name"=>"Excl","datasets"=>["pin/appdata"],"recursive"=>true,
+  "local_target"=>["enabled"=>true,"dataset"=>"minikeg/excl"],
+  "remote_target"=>["enabled"=>true,"host"=>"fakehost","user"=>"root","port"=>22,"dataset"=>"tank/excl",
+                    "exclude_datasets"=>["pin/appdata/models"]]]')
+$S/shive-run $IDX --no-prune >/dev/null 2>&1
+check "target-only exclusion still snapshots the dataset"  "zfs list -H -o name pin/appdata/models@\$(zfs list -H -t snapshot -o name -d 1 pin/appdata | tail -1 | sed 's/.*@//')"
+check "excluded only on the target that asked for it"      "zfs list -H -o name -r minikeg/excl | grep -q models && ! zfs list -H -o name -r tank/excl | grep -q models"
+check "everything else reached both targets"               "zfs list -H -o name -r tank/excl | grep -q paperless && zfs list -H -o name -r minikeg/excl | grep -q paperless"
+# promote it to a snapshot-level exclusion: now nothing anywhere
+php -r "require '$SRC/include/config.php'; \$x=shive_schedule_load('$IDX'); \$x['exclude_datasets']=['pin/appdata/models']; \$x['remote_target']['exclude_datasets']=[]; shive_schedule_save(\$x);"
+zfs destroy -r minikeg/excl >/dev/null 2>&1; zfs destroy -r tank/excl >/dev/null 2>&1
+zfs create minikeg/excl >/dev/null 2>&1; zfs create tank/excl >/dev/null 2>&1
+sleep 2; $S/shive-run $IDX --no-prune >/tmp/excl.log 2>&1
+check "snapshot-level exclusion skips the snapshot itself"  "grep -q 'excluded from snapshot: pin/appdata/models' /tmp/excl.log"
+check "and reaches neither target"                          "! zfs list -H -o name -r minikeg/excl | grep -q models && ! zfs list -H -o name -r tank/excl | grep -q models"
+sleep 2; $S/shive-run $IDX --no-prune >/tmp/excl2.log 2>&1
+check "per-dataset path still goes incremental on re-run"   "grep -q 'incremental base: @' /tmp/excl2.log && ! grep -q 'ERROR' /tmp/excl2.log"
+zfs create pin/appdata/brandnew >/dev/null 2>&1; echo b > /mnt/pin/appdata/brandnew/x
+sleep 2; $S/shive-run $IDX --no-prune >/tmp/excl3.log 2>&1
+check "a child added later is picked up by a full send"     "zfs list -H -o name -r minikeg/excl | grep -q brandnew"
+check "exclusions never fail the run"                       "jq -e '.status==\"success\"' /boot/config/plugins/shive/state/$IDX.last.json"
+# validation: an exclusion that matches nothing would silently exclude nothing
+check "non-existent exclusion is rejected"                  "A POST 'op=schedule_save&schedule={\"name\":\"bad\",\"datasets\":[\"pin/appdata\"],\"recursive\":true,\"exclude_datasets\":[\"pin/appdata/nope\"]}' | jq -e '.ok==false'"
+check "a source dataset as its own exclusion is rejected"   "A POST 'op=schedule_save&schedule={\"name\":\"bad\",\"datasets\":[\"pin/appdata\"],\"recursive\":true,\"exclude_datasets\":[\"pin/appdata\"]}' | jq -e '.ok==false'"
+zfs destroy -r pin/appdata/models >/dev/null 2>&1; zfs destroy -r pin/appdata/brandnew >/dev/null 2>&1
+zfs destroy -r minikeg/excl >/dev/null 2>&1; zfs destroy -r tank/excl >/dev/null 2>&1
+php -r "require '$SRC/include/config.php'; shive_schedule_delete('$IDX');" >/dev/null 2>&1
+: > /tmp/notify.log
+
 sec "crash recovery"
 # Set up our own container state rather than relying on an earlier section's cleanup: the fake
 # docker does a read-modify-write, so a late write from a previous (deliberately killed) run can

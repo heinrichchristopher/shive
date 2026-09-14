@@ -89,6 +89,20 @@ dataset_exists() { zfs list -H -o name "$1" >/dev/null 2>&1; }
 array_started() { grep -q '^mdState="STARTED"' /var/local/emhttp/var.ini 2>/dev/null; }
 snap_names() { zfs list -H -o name -s creation -t snapshot -d 1 "$1" 2>/dev/null | sed 's/.*@//'; }
 
+# is_excluded <dataset> <excluded...> -> true when the dataset is listed, or sits below one of
+# the listed ones (excluding a dataset always excludes its children - they'd have no parent to
+# receive into otherwise).
+is_excluded() {
+  local d="$1"; shift
+  local x
+  for x in "$@"; do
+    [ -z "$x" ] && continue
+    [ "$d" = "$x" ] && return 0
+    case "$d" in "$x"/*) return 0;; esac
+  done
+  return 1
+}
+
 # ---- target abstraction ----------------------------------------------------
 # spec:  local:<pool/dataset>   |   ssh://[user@]host[:port]/<pool/dataset>
 t_parse() {
