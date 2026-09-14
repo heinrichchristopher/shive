@@ -73,11 +73,24 @@ var Shive = (function () {
         return srcs.some(function (s) { return n !== s && n.indexOf(s + '/') === 0; });
       });
       $('#f-excl-wrap').toggle(rec && children.length > 0);
-      ['f-exclude', 'f-local-exclude', 'f-remote-exclude'].forEach(function (id) {
+
+      var render = function (id, list) {
         var was = $('#' + id + ' input:checked').map(function () { return this.value; }).get();
-        $('#' + id).html(children.map(function (n) {
-          return '<label><input type="checkbox" value="' + esc(n) + '"' + (was.indexOf(n) >= 0 ? ' checked' : '') + '>' + esc(n) + '</label>';
+        $('#' + id).html(list.map(function (n) {
+          return '<label><input type="checkbox" value="' + esc(n) + '"' + (was.indexOf(n) >= 0 ? ' checked' : '') +
+                 (id === 'f-exclude' ? ' onchange="Shive.sched.excludeUI()"' : '') + '>' + esc(n) + '</label>';
         }).join('') || '<span class="shive-hint">no child datasets</span>');
+      };
+      render('f-exclude', children);
+      // A dataset with no snapshot can't be sent anywhere, so offering it again per target would
+      // suggest a choice that doesn't exist - drop those from the target lists entirely.
+      var snapExcluded = sched.excluded('f-exclude');
+      var sendable = children.filter(function (n) {
+        return !snapExcluded.some(function (x) { return n === x || n.indexOf(x + '/') === 0; });
+      });
+      ['f-local-exclude', 'f-remote-exclude'].forEach(function (id) {
+        render(id, sendable);
+        if (!sendable.length) $('#' + id).html('<span class="shive-hint">nothing left to skip – every child dataset is already excluded from the snapshot</span>');
       });
     },
     excluded: function (id) { return $('#' + id + ' input:checked').map(function () { return this.value; }).get(); },
@@ -118,6 +131,7 @@ var Shive = (function () {
       $('#f-docker').prop('checked', s ? s.docker_aware : false); $('#f-linked').text('');
       sched.excludeUI();
       sched.setExcluded('f-exclude', s ? s.exclude_datasets : []);
+      sched.excludeUI();   // again: the target lists are filtered by the snapshot exclusions just set
       sched.setExcluded('f-local-exclude', s ? s.local_target.exclude_datasets : []);
       sched.setExcluded('f-remote-exclude', s ? s.remote_target.exclude_datasets : []);
       $('#f-local-on').prop('checked', s ? s.local_target.enabled : false); $('#f-local-ds').val(s ? s.local_target.dataset : '');

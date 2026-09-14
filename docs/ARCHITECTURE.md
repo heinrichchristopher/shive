@@ -563,6 +563,13 @@ Implementation notes:
   worth catching at save time. The existence check is skipped when ZFS isn't answering, so a
   stopped array can't block saving a valid schedule.
 
+GUI detail: the per-target lists only offer datasets that still have a snapshot - anything already
+excluded at the schedule level is dropped from them, since "additionally skip when sending" is not
+a choice that exists for a dataset that was never snapshotted. The lists therefore re-render when a
+snapshot exclusion is ticked, and `edit()` calls `excludeUI()` a second time after applying a saved
+schedule's snapshot exclusions (the first call runs before they are set, so the target lists would
+otherwise open unfiltered).
+
 **Bug found while testing this:** picking the snapshot name before knowing which datasets are
 involved. `snap_name` only checked the first source dataset's subtree for a same-minute collision,
 but `zfs snapshot` fails the *entire batch* if any one name already exists - so a collision on a
