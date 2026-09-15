@@ -271,7 +271,13 @@ do_send() { # <location> <target-root-spec> <excluded...>
     local d rel child_spec
     while IFS= read -r d; do
       [ -n "$d" ] || continue
-      zfs list -H -o name "$d@$SNAP" >/dev/null 2>&1 || continue    # excluded from the snapshot
+      is_excluded "$d" "${EXCLUDE_SNAP[@]}" && { log "excluded from $loc send: $d (excluded from the snapshot itself)"; continue; }
+      # Real runs only: a dataset that appeared between snapshotting and sending has no real
+      # snapshot to send even though it isn't configured as excluded - skip it, don't fail.
+      # (Dry-run never creates a real snapshot, so this check would wrongly skip everything.)
+      if [ "$DRY_RUN" != 1 ] && ! zfs list -H -o name "$d@$SNAP" >/dev/null 2>&1; then
+        log "no snapshot on $d - appeared after snapshotting, skipping"; continue
+      fi
       if is_excluded "$d" "${excl[@]}"; then log "excluded from $loc send: $d"; continue; fi
       rel="${d#"$ds"}"                                             # "" for the root, "/child" below
       [ "$T_TYPE" = local ] && child_spec="local:$tgt$rel" || child_spec="${root%/$T_DS}/$tgt$rel"

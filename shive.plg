@@ -2,13 +2,13 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "shive">
 <!ENTITY author    "heinrichchristopher">
-<!ENTITY version   "2026.09.14.2">
+<!ENTITY version   "2026.09.15">
 <!ENTITY launch    "Settings/Shive">
 <!ENTITY gitURL    "https://raw.githubusercontent.com/heinrichchristopher/shive/main">
 <!ENTITY pluginURL "&gitURL;/shive.plg">
 <!ENTITY pkgURL    "https://github.com/heinrichchristopher/shive/releases/download/&version;">
 <!ENTITY pkgName   "shive-&version;-noarch-1.txz">
-<!ENTITY pkgMD5    "5cccf98e250fa2d0a28688e4b8417340">
+<!ENTITY pkgMD5    "a0cef3ea95aec23ca2a8cd721a143567">
 <!ENTITY plgPath   "/boot/config/plugins/&name;">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
 ]>
@@ -18,6 +18,17 @@
         support="https://github.com/heinrichchristopher/shive/issues">
 
 <CHANGES>
+###2026.09.15
+- Fix: dry-run of a schedule with a target-level exclusion showed nothing under SEND_LOCAL/
+  SEND_REMOTE - the check deciding what to send relied on a real snapshot that dry-run never
+  creates. Dry-run now correctly shows what would be sent and what would be excluded.
+- Fix: pruning a target whose dataset has never been created yet (first-ever run, dry-run, or a
+  skipped/failed send) crashed with "FATAL: retention classification failed" instead of reporting
+  "nothing to prune yet".
+###2026.09.14 (.1/.2: GUI fix + re-release after a mistagged .1)
+- Dataset exclusions: recursive schedules can leave individual child datasets out of the snapshot
+  entirely, or out of just one replication target (additive to the snapshot-level exclusion).
+- GUI: the per-target exclusion lists now only offer datasets that still get a snapshot.
 ###2026.09.12
 - Run logs and retired run-state files are now capped (newest 200 / 50) instead of growing for
   the whole uptime; the cron file is no longer rewritten to flash when it is already correct.

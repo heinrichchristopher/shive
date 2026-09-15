@@ -318,6 +318,22 @@ zfs destroy -r minikeg/excl >/dev/null 2>&1; zfs destroy -r tank/excl >/dev/null
 php -r "require '$SRC/include/config.php'; shive_schedule_delete('$IDX');" >/dev/null 2>&1
 : > /tmp/notify.log
 
+sec "dry-run with exclusions must actually show what would be sent (field bug 2026-09-15)"
+zfs create pin/appdata/models >/dev/null 2>&1; echo m > /mnt/pin/appdata/models/x
+zfs create minikeg/dryex >/dev/null 2>&1    # root only - the per-dataset target under it never existed
+IDD2=$(php_save '["name"=>"DryExcl","datasets"=>["pin/appdata"],"recursive"=>true,
+  "local_target"=>["enabled"=>true,"dataset"=>"minikeg/dryex","exclude_datasets"=>["pin/appdata/models"]]]')
+$S/shive-run $IDD2 --dry-run >/tmp/dryex.log 2>&1
+check "dry-run with exclusions actually logs what would send"  "grep -q 'DRY-RUN: zfs send pin/appdata@' /tmp/dryex.log"
+check "dry-run correctly shows the exclusion taking effect"    "grep -q 'excluded from local send: pin/appdata/models' /tmp/dryex.log"
+check "dry-run prune does not crash on a never-created target" "grep -q 'dataset does not exist yet - nothing to prune' /tmp/dryex.log && ! grep -q FATAL /tmp/dryex.log"
+check "run still reports success, not warning"                 "grep -q 'run finished: success' /tmp/dryex.log"
+# same target for real now, then prune it directly - must classify normally, not crash
+$S/shive-run $IDD2 --no-prune >/dev/null 2>&1
+check "prune on a freshly-created real target works"           "$S/shive-prune --sched $IDD2 --location local --dataset minikeg/dryex/appdata --json | jq -e '.keep|length==1'"
+zfs destroy -r pin/appdata/models >/dev/null 2>&1; zfs destroy -r minikeg/dryex >/dev/null 2>&1
+php -r "require '$SRC/include/config.php'; shive_schedule_delete('$IDD2');" >/dev/null 2>&1
+
 sec "crash recovery"
 # Set up our own container state rather than relying on an earlier section's cleanup: the fake
 # docker does a read-modify-write, so a late write from a previous (deliberately killed) run can

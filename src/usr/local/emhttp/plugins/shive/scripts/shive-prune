@@ -22,6 +22,18 @@ POLICY=$(sq "$SCHED_JSON" ".retention.$LOC")
 
 RFLAG=""; [ $REC = 1 ] && RFLAG="-r"
 PREFIX=$(sq "$SCHED_JSON" .tag_prefix)
+
+# A location's dataset may genuinely not exist yet - first-ever run, dry-run (nothing real was
+# ever sent), or a send that was skipped this time. "$2>/dev/null" below only silences the error
+# TEXT of a failing `zfs list`, not its exit code - under `set -o pipefail` that failure still
+# kills the whole classification pipe with a cryptic FATAL. Treat "doesn't exist" as "nothing to
+# prune yet", the same way an existing-but-empty dataset already is.
+if ! t_exec zfs list -H -o name "$DS" >/dev/null 2>&1; then
+  log "prune $LOC $DS: dataset does not exist yet - nothing to prune"
+  [ $JSON = 1 ] && echo '{"keep":[],"destroy":[],"reasons":{},"policy_summary":"dataset absent"}'
+  exit 0
+fi
+
 # name<TAB>creation-epoch, only our own tag
 # grep exits 1 on zero matches (a perfectly normal case: nothing of ours here yet) -
 # neutralize that so pipefail doesn't misreport an empty result as a failure.

@@ -575,3 +575,33 @@ involved. `snap_name` only checked the first source dataset's subtree for a same
 but `zfs snapshot` fails the *entire batch* if any one name already exists - so a collision on a
 second source dataset, or on a tree reshaped by exclusions, failed the run. The name is now chosen
 after the dataset list is built and checked against every dataset in it.
+
+## Two bugs in the exclusion feature's dry-run/first-run path (2026-09-15, reported live)
+
+Both surfaced together on a real dry-run of a schedule with a target-level exclusion, against a
+target root that existed but whose per-dataset child had never actually been created (nothing had
+ever really been sent there yet - a first-time dry-run is exactly this situation for everyone).
+
+**1. `do_send()`'s exclusion-aware per-dataset branch checked whether the real snapshot
+`$d@$SNAP` existed to decide "was this excluded from the snapshot" - but a dry-run never creates
+that snapshot for real (only logs that it would). Every dataset therefore silently failed that
+check and was skipped, so a dry-run of any schedule with exclusions showed literally nothing
+under SEND_LOCAL/SEND_REMOTE: no sends, no exclusion log lines, no error - useless for exactly
+the thing dry-run exists for (verifying what a schedule would do before running it for real).
+Fixed by checking membership in `EXCLUDE_SNAP` (the actual configured exclusion list) directly,
+which is correct in both dry-run and real runs; the live snapshot-existence check still runs, but
+only outside dry-run, to catch the unrelated (and very narrow) case of a dataset appearing in the
+tree after snapshotting but before sending.
+
+**2. `shive-prune`'s classification pipe only neutralized `grep`'s exit code for zero matches
+(`grep ... || true`, from an earlier fix) - it did nothing for the *first* stage of the pipe,
+`zfs list`, failing outright when the location's dataset doesn't exist at all. Under `pipefail`
+that propagates straight to `|| die "retention classification failed"`, a FATAL for a state
+(nothing has ever been sent here yet) that is entirely normal - a first-ever dry-run against any
+target hits it every time, and so would a real run whose send this time was skipped or failed.
+Fixed by checking existence up front and reporting it the same way an existing-but-empty dataset
+already is - "nothing to prune yet" - instead of dying.
+
+Both were latent since exclusions were added five days earlier; nobody had dry-run a schedule with
+a target-level exclusion against a not-yet-populated target until now. Added as permanent checks;
+suite: 136.
