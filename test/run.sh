@@ -334,6 +334,50 @@ check "prune on a freshly-created real target works"           "$S/shive-prune -
 zfs destroy -r pin/appdata/models >/dev/null 2>&1; zfs destroy -r minikeg/dryex >/dev/null 2>&1
 php -r "require '$SRC/include/config.php'; shive_schedule_delete('$IDD2');" >/dev/null 2>&1
 
+sec "replication base lost on the TARGET side (checked by GUID, explained in plain terms)"
+# shive-send driven directly with explicitly named snapshots, so no case depends on the wall clock
+IDB=$(php_save '["name"=>"BaseLoss","datasets"=>["pin/bl"],"recursive"=>false,"local_target"=>["enabled"=>true,"dataset"=>"minikeg/bl"]]')
+P="shive-$IDB"
+blsend() { $S/shive-send --sched $IDB --from "pin/bl@$1" --to local:minikeg/bl/bl > /tmp/bl.log 2>&1; }
+blreset() { zfs destroy -r pin/bl >/dev/null 2>&1; zfs destroy -r minikeg/bl >/dev/null 2>&1; zfs create pin/bl; zfs create minikeg/bl; }
+blreset
+zfs snapshot pin/bl@$P-01010001-0001; blsend $P-01010001-0001
+zfs destroy pin/bl@$P-01010001-0001; zfs snapshot pin/bl@$P-01010002-0002; blsend $P-01010002-0002
+check "base gone on the source only: bookmark fallback still works"  "grep -q 'incremental base: bookmark' /tmp/bl.log && ! grep -q FATAL /tmp/bl.log"
+blreset
+zfs snapshot pin/bl@$P-02010001-0001; blsend $P-02010001-0001
+zfs snapshot pin/bl@$P-02010002-0002; blsend $P-02010002-0002
+zfs destroy pin/bl@$P-02010001-0001; zfs destroy pin/bl@$P-02010002-0002
+zfs destroy minikeg/bl/bl@$P-02010002-0002
+zfs snapshot pin/bl@$P-02010003-0003; blsend $P-02010003-0003
+check "bookmark origin deleted on target: explained, not a raw zfs error" "grep -q 'no longer exists on the target' /tmp/bl.log && grep -q 'reset replication' /tmp/bl.log"
+check "... and zfs receive was never even attempted"                  "! grep -q 'cannot receive' /tmp/bl.log"
+blreset
+zfs snapshot pin/bl@$P-03010001-0001; blsend $P-03010001-0001
+zfs destroy pin/bl@$P-03010001-0001; zfs snapshot minikeg/bl/bl@manual-by-hand
+zfs snapshot pin/bl@$P-03010002-0002; blsend $P-03010002-0002
+check "foreign newer snapshot on target: its own, different explanation" "grep -q 'snapshot newer than the last one Shive sent' /tmp/bl.log"
+blreset
+zfs snapshot pin/bl@$P-04010001-0001; blsend $P-04010001-0001
+zfs destroy pin/bl@$P-04010001-0001; zfs snapshot pin/bl@$P-04010001-0001
+blsend $P-04010001-0001
+check "same name, different snapshot: no false 'nothing to send'"    "grep -q 'different snapshot with the same name' /tmp/bl.log && ! grep -q 'nothing to send' /tmp/bl.log"
+blreset
+zfs snapshot pin/bl@$P-05010001-0001; blsend $P-05010001-0001; blsend $P-05010001-0001
+check "genuine retry of the same snapshot is still 'nothing to send'" "grep -q 'nothing to send' /tmp/bl.log && ! grep -q FATAL /tmp/bl.log"
+# the reason must reach the recorded error (notification + History tab), not only the log file
+zfs destroy -r pin/bl >/dev/null 2>&1; zfs destroy -r minikeg/bl >/dev/null 2>&1; zfs create pin/bl; zfs create minikeg/bl
+$S/shive-run $IDB --no-prune >/dev/null 2>&1
+BO=$(zfs list -H -t snapshot -o name -d 1 pin/bl | tail -1 | sed 's/.*@//')
+for sn in $(zfs list -H -t snapshot -o name -d 1 pin/bl | sed 's/.*@//'); do zfs destroy pin/bl@$sn; done
+zfs snapshot pin/bl@$P-06010001-0001 >/dev/null; zfs destroy minikeg/bl/bl@$BO
+zfs destroy pin/bl@$P-06010001-0001 >/dev/null
+sleep 1; $S/shive-run $IDB --no-prune >/dev/null 2>&1
+check "reason reaches the recorded error, not just the log"          "jq -e '.errors|any(test(\"no longer exists on the target\"))' /boot/config/plugins/shive/state/$IDB.last.json"
+zfs destroy -r pin/bl >/dev/null 2>&1; zfs destroy -r minikeg/bl >/dev/null 2>&1
+php -r "require '$SRC/include/config.php'; shive_schedule_delete('$IDB');" >/dev/null 2>&1
+: > /tmp/notify.log
+
 sec "crash recovery"
 # Set up our own container state rather than relying on an earlier section's cleanup: the fake
 # docker does a read-modify-write, so a late write from a previous (deliberately killed) run can

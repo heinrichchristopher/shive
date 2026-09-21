@@ -605,3 +605,44 @@ already is - "nothing to prune yet" - instead of dying.
 Both were latent since exclusions were added five days earlier; nobody had dry-run a schedule with
 a target-level exclusion against a not-yet-populated target until now. Added as permanent checks;
 suite: 136.
+
+## Replication base lost on the TARGET side (2026-09-21)
+
+Question raised before submitting to Community Applications: can retention or a user delete the
+common base and break replication? Answer, verified in code and simulator:
+
+- **Source side, automatic or manual:** fully handled. Every successful send refreshes a bookmark
+  on the source at the snapshot just sent; bookmarks survive their snapshot's deletion, and
+  `shive-send` falls back to them. Verified live earlier on the real box.
+- **Target side, Shive's own retention - even set much shorter than the source:** cannot hit it.
+  `retention_plan()` always keeps the newest snapshot, and the newest on a target is by
+  construction the one the source bookmark points to (it is refreshed on every send).
+- **Target side, by hand or by another tool:** was the one real gap. The bookmark path went ahead
+  without checking the target, and `zfs receive` then refused with "most recent snapshot of X does
+  not match incremental source" - safe (nothing received, nothing diverges) but not actionable.
+
+Now, before any bookmark-based send, `bm_check()` compares by **GUID**: a bookmark carries its
+origin snapshot's GUID, and a snapshot keeps its GUID through send/receive. Two distinct outcomes,
+each with its own plain-language explanation and recovery step: origin gone from the target (reset
+replication for that target), or a foreign snapshot newer than it on the target (destroy that
+snapshot). `zfs receive` is not even attempted. The reason is also carried into the recorded error
+via `send_failure_reason()`, so it shows up in the notification and History tab, not only in the
+log file.
+
+**Second bug found while building the test for this.** The "target already has @snap - nothing to
+send" short-circuit compared snapshot **names** only. Names carry only the minute, so once the
+source's snapshots are gone, a new snapshot can reuse a name still sitting on the target. Shive
+then reported success, sent nothing, and moved the bookmark to a snapshot the target does not have
+- a silent failure reported as success. Now also verified by GUID; a same-named but different
+snapshot is refused with an explanation. A genuine retry (same GUID) is still "nothing to send".
+
+**Simulator fidelity.** The ZFS simulator had no GUIDs and accepted a bookmark-based incremental
+into any target unconditionally - so neither failure could ever have been reproduced by the suite.
+It now assigns a GUID per snapshot, preserves it through send/receive, copies it into bookmarks, and
+refuses a bookmark receive whose origin isn't the target's newest snapshot, like real ZFS. All
+cases are driven through `shive-send` with explicitly named snapshots so none depends on the wall
+clock. Suite: 143.
+
+One unexplained single failure of the "foreign newer snapshot" check on the first suite run after
+adding it; not reproduced in the next three runs, and the case has no timing dependence. Noted
+rather than guessed at.

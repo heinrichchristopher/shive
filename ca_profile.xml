@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CommunityApplications>
+  <Profile>
+Shive is a ZFS snapshot scheduling, retention and replication plugin for Unraid 7.2+. It takes
+scheduled snapshots of any dataset, prunes them by age or a GFS (hourly/daily/weekly/monthly)
+policy per location, optionally quiesces the Docker containers whose data lives on the
+snapshotted datasets, replicates to a second local pool and/or an SSH host, and lets you browse
+and restore files, folders or whole datasets from the WebGUI. This repository contains the Shive
+plugin only.
+  </Profile>
+  <Icon>https://raw.githubusercontent.com/heinrichchristopher/shive/main/icons/shive-color.png</Icon>
+  <WebPage>https://github.com/heinrichchristopher/shive</WebPage>
+</CommunityApplications>

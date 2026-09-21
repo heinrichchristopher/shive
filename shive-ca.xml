@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Plugin>
+  <Name>shive</Name>
+  <PluginURL>https://raw.githubusercontent.com/heinrichchristopher/shive/main/shive.plg</PluginURL>
+  <Support>https://forums.unraid.net/topic/YOUR_SUPPORT_TOPIC</Support>
+  <Project>https://github.com/heinrichchristopher/shive</Project>
+  <Overview>
+Scheduled ZFS snapshots with age or GFS (hourly/daily/weekly/monthly) retention per location,
+optional Docker container quiesce/resume around the snapshot, replication to a second local pool
+and/or an SSH host, and a WebGUI snapshot browser with file/folder/dataset restore and disaster
+recovery. A failed backup never leaves a container down: the resume is anchored on an EXIT trap
+and backed by a crash-recovery pass. Pruning only ever touches a schedule's own snapshots, and
+every destructive action requires explicit confirmation.
+  </Overview>
+  <Category>Backup:</Category>
+  <Icon>https://raw.githubusercontent.com/heinrichchristopher/shive/main/icons/shive-color.png</Icon>
+</Plugin>

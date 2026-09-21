@@ -9,10 +9,11 @@ def save(s): json.dump(s, open(ST,'w'), indent=1)
 def die(m): print(m, file=sys.stderr); sys.exit(1)
 def tick(s): s['clock'] += 60; return s['clock']
 def mp(name): return '/mnt/' + name
+def new_guid(): return int.from_bytes(os.urandom(7), 'big')
 def ds_new(s, name, props=None):
     p = {'mountpoint': mp(name), 'encryption': 'off', 'readonly': 'off', 'canmount': 'on'}
     if props: p.update(props)
-    s['ds'][name] = {'props': p, 'snaps': {}, 'snapprops': {}, 'bms': {}, 'token': '-'}
+    s['ds'][name] = {'props': p, 'snaps': {}, 'snapprops': {}, 'bms': {}, 'guids': {}, 'bmguids': {}, 'token': '-'}
     if p.get('canmount') != 'off': os.makedirs(p['mountpoint'], exist_ok=True)
 def children(s, name, depth=None):
     out=[]
@@ -70,7 +71,7 @@ if cmd == 'list':
                 rows.append({'name': n, 'creation': 0, 'mountpoint': d['props']['mountpoint'], 'mounted': 'yes' if d['props'].get('canmount')!='off' and os.path.isdir(d['props']['mountpoint']) else 'no', 'used': 1000, 'avail': 10**9, 'encryption': d['props']['encryption'], 'referenced': 1000})
             elif typ == 'snapshot':
                 for sn, c in d['snaps'].items():
-                    row = {'name': f'{n}@{sn}', 'creation': c, 'used': 100, 'referenced': 1000, 'clones': '-'}
+                    row = {'name': f'{n}@{sn}', 'creation': c, 'used': 100, 'referenced': 1000, 'clones': '-', 'guid': d.get('guids', {}).get(sn, '-')}
                     for k, v in d.get('snapprops', {}).get(sn, {}).items(): row[k] = v
                     rows.append(row)
             elif typ == 'bookmark':
@@ -91,7 +92,7 @@ elif cmd == 'snapshot':
             targets.append((n, sn))
     ts = tick(s)   # one timestamp for all of them: atomic, same point in time
     for n, sn in targets:
-        s['ds'][n]['snaps'][sn] = ts; snapdir_copy(n, sn)
+        s['ds'][n]['snaps'][sn] = ts; s['ds'][n].setdefault('guids', {})[sn] = new_guid(); snapdir_copy(n, sn)
     save(s)
 elif cmd == 'destroy':
     f, rest = flags(a[1:], [])
@@ -99,25 +100,31 @@ elif cmd == 'destroy':
     if '@' in t:
         dsn, sn = t.split('@')
         for n in (children(s, dsn) if '-r' in f else [dsn]):
-            s['ds'][n]['snaps'].pop(sn, None); shutil.rmtree(os.path.join(mp(n),'.zfs','snapshot',sn), ignore_errors=True)
+            s['ds'][n]['snaps'].pop(sn, None); s['ds'][n].get('guids', {}).pop(sn, None); shutil.rmtree(os.path.join(mp(n),'.zfs','snapshot',sn), ignore_errors=True)
     elif '#' in t:
-        dsn, bn = t.split('#'); s['ds'][dsn]['bms'].pop(bn, None)
+        dsn, bn = t.split('#'); s['ds'][dsn]['bms'].pop(bn, None); s['ds'][dsn].get('bmguids', {}).pop(bn, None)
     else:
         for n in children(s, t): s['ds'].pop(n, None); shutil.rmtree(mp(n), ignore_errors=True)
     save(s)
 elif cmd == 'bookmark':
     src, bm = a[1], a[2]; dsn, sn = src.split('@'); bn = bm.split('#')[1]
-    s['ds'][dsn]['bms'][bn] = s['ds'][dsn]['snaps'][sn]; save(s)
+    s['ds'][dsn]['bms'][bn] = s['ds'][dsn]['snaps'][sn]
+    s['ds'][dsn].setdefault('bmguids', {})[bn] = s['ds'][dsn].get('guids', {}).get(sn, 0); save(s)
 elif cmd == 'get':
     f, rest = flags(a[1:], ['-o'])
     props = rest[0].split(','); t = rest[1]
+    if '#' in t:
+        bdsn, bn = t.split('#'); bd = s['ds'].get(bdsn)
+        if not bd or bn not in bd['bms']: die(f"cannot open '{t}': bookmark does not exist")
+        for p in props: print(bd.get('bmguids', {}).get(bn, '-') if p == 'guid' else bd['bms'][bn] if p == 'creation' else '-')
+        sys.exit(0)
     dsn = t.split('@')[0]; d = s['ds'].get(dsn)
     if not d: die(f"cannot open '{t}': dataset does not exist")
     if '@' in t:
         sn = t.split('@')[1]
         sp = d.get('snapprops', {}).get(sn, {})
         for p in props:
-            print(sp.get(p, '-') if p != 'creation' else d['snaps'].get(sn, 0))
+            print(d.get('guids', {}).get(sn, '-') if p == 'guid' else sp.get(p, '-') if p != 'creation' else d['snaps'].get(sn, 0))
         sys.exit(0)
     for p in props:
         if p == 'mounted': v = 'yes' if d['props'].get('canmount')!='off' and os.path.isdir(d['props']['mountpoint']) else 'no'
@@ -173,7 +180,8 @@ elif cmd == 'send':
                 bc = d['bms'].get(stream['base'])
                 if bc is None: die(f"incremental source {n}#{stream['base']} does not exist")
                 snaps = {sn: d['snaps'][sn]}
-            stream['datasets'][n] = {'props': d['props'], 'snaps': snaps}
+                stream['bm_guid'] = d.get('bmguids', {}).get(stream['base'])
+            stream['datasets'][n] = {'props': d['props'], 'snaps': snaps, 'guids': {k: d.get('guids', {}).get(k) for k in snaps}}
     if '-n' in f:
         print('size\t' + str(sum(len(v['snaps'])*1000 for v in stream['datasets'].values())))
     else:
@@ -191,10 +199,12 @@ elif cmd == 'receive':
         if stream['base'] and not d.get('full'):
             if not exists: die(f"cannot receive incremental stream: destination '{tn}' does not exist")
             td = s['ds'][tn]
+            if not td['snaps']: die("cannot receive incremental: destination has no snapshots")
+            newest = max(td['snaps'], key=lambda k: td['snaps'][k])
             if not stream['base_is_bm']:
-                if not td['snaps']: die("cannot receive incremental: destination has no snapshots")
-                newest = max(td['snaps'], key=lambda k: td['snaps'][k])
                 if newest != stream['base']: die(f"cannot receive incremental stream: most recent snapshot of {tn} does not match incremental source")
+            elif td.get('guids', {}).get(newest) != stream.get('bm_guid'):
+                die(f"cannot receive incremental stream: most recent snapshot of {tn} does not match incremental source")
         else:
             if exists and not d.get('full'): die(f"cannot receive new filesystem stream: destination '{tn}' exists")
             if exists: continue
@@ -205,6 +215,7 @@ elif cmd == 'receive':
         if setp: s['ds'][tn]['props'].update(setp)
         for sn, c in d['snaps'].items():
             s['ds'][tn]['snaps'][sn] = c
+            s['ds'][tn].setdefault('guids', {})[sn] = d.get('guids', {}).get(sn) or new_guid()
             sd = os.path.join(mp(n),'.zfs','snapshot',sn)
             if os.path.isdir(sd): shutil.copytree(sd, os.path.join(mp(tn),'.zfs','snapshot',sn), dirs_exist_ok=True)
     save(s)

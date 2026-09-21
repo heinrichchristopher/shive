@@ -249,9 +249,12 @@ fi
 # ---- SEND -------------------------------------------------------------------
 # shellcheck disable=SC2046  # the $( ... && echo --flag ) idiom below relies on word splitting
 #                               to add optional arguments; the values are fixed literals
+# shive-send explains a failure on its own FATAL line in the shared run log; carry that reason into
+# the recorded error so it reaches the notification and the History tab, not just the log file.
+send_failure_reason() { grep -o 'FATAL: .*' "$LOG_FILE" 2>/dev/null | tail -1 | sed 's/^FATAL: //; s/\.$//'; }
 do_send() { # <location> <target-root-spec> <excluded...>
   local loc="$1" root="$2"; shift 2
-  local excl=("$@") ok=1 ds tgt spec
+  local excl=("$@") ok=1 ds tgt spec r
   phase "SEND_${loc^^}"
   for ds in "${DATASETS[@]}"; do
     t_parse "$root"; tgt=$(target_for "$T_DS" "$ds")
@@ -261,7 +264,7 @@ do_send() { # <location> <target-root-spec> <excluded...>
       # no exclusions: one -R stream for the whole tree, as before
       if ! "$SHIVE_EMHTTP/scripts/shive-send" --sched "$SCHED_ID" --from "$ds@$SNAP" --to "$spec" \
            $( [ "$RECURSIVE" = true ] && echo --recursive ) --exclude-props "$EXCL" $( [ $DRY_RUN = 1 ] && echo --dry-run ); then
-        add_error "$loc send of $ds failed"; ok=0
+        r=$(send_failure_reason); add_error "$loc send of $ds failed${r:+: $r}"; ok=0
       fi
       continue
     fi
@@ -283,7 +286,7 @@ do_send() { # <location> <target-root-spec> <excluded...>
       [ "$T_TYPE" = local ] && child_spec="local:$tgt$rel" || child_spec="${root%/$T_DS}/$tgt$rel"
       if ! "$SHIVE_EMHTTP/scripts/shive-send" --sched "$SCHED_ID" --from "$d@$SNAP" --to "$child_spec" \
            --exclude-props "$EXCL" $( [ $DRY_RUN = 1 ] && echo --dry-run ); then
-        add_error "$loc send of $d failed"; ok=0
+        r=$(send_failure_reason); add_error "$loc send of $d failed${r:+: $r}"; ok=0
       fi
     done < <(zfs list -H -r -o name "$ds" 2>/dev/null)
   done

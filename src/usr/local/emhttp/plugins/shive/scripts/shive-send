@@ -49,6 +49,27 @@ pipe_send() { # <zfs send args...>  ->  runs the send|receive pipeline into $T_D
   fi
 }
 
+# A bookmark records the GUID of the snapshot it was made from, and a snapshot keeps its GUID when
+# it is replicated. A bookmark-based incremental can only be received if the target's NEWEST
+# snapshot is that very snapshot - so check it by GUID before sending, and explain the outcome in
+# plain terms instead of letting `zfs receive` fail with "does not match incremental source".
+#   bm_check <source-bookmark> <target-dataset>  ->  0 usable, 1 origin gone, 2 origin not newest
+bm_check() {
+  local bm="$1" tds="$2" bmguid newest
+  bmguid=$(zfs get -H -o value guid "$bm" 2>/dev/null) || return 0      # can't tell: let receive decide
+  [ -n "$bmguid" ] && [ "$bmguid" != "-" ] || return 0
+  t_exec zfs list -H -o guid -t snapshot -d 1 "$tds" 2>/dev/null | grep -qx "$bmguid" || return 1
+  newest=$(t_exec zfs list -H -o guid -s creation -t snapshot -d 1 "$tds" 2>/dev/null | tail -1)
+  [ "$newest" = "$bmguid" ] || return 2
+  return 0
+}
+bm_explain() { # <rc from bm_check> <source dataset> <target dataset>
+  case "$1" in
+    1) die "cannot continue replication of $2 into $3: the last snapshot sent there - the one this schedule's bookmark points to - no longer exists on the target (deleted there by hand or by a tool other than Shive; Shive's own retention always keeps the newest snapshot). No other snapshot is shared with the source any more, so there is no incremental base left. Nothing was changed. To recover, reset replication for this target: move or destroy $3 (check it first: zfs list -t all -r $3); the next run then sends a full copy." ;;
+    2) die "cannot continue replication of $2 into $3: the target has a snapshot newer than the last one Shive sent (the one this schedule's bookmark points to) - created on the target by hand or by another tool. zfs receive only continues from the target's newest snapshot. Nothing was changed. Destroy the newer snapshot(s) on $3 that did not come from Shive, then run again." ;;
+  esac
+}
+
 # 1. interrupted stream? finish it first
 if t_dataset_exists "$T_DS"; then
   token=$(t_exec zfs get -H -o value receive_resume_token "$T_DS" 2>/dev/null || echo "-")
@@ -62,6 +83,15 @@ fi
 if t_dataset_exists "$T_DS"; then
   mapfile -t tsnaps < <(t_snap_names "$T_DS" | grep "^$PREFIX" || true)
   if printf '%s\n' "${tsnaps[@]}" | grep -qx "$SNAP"; then
+    # Same NAME is not the same snapshot: the name only carries the minute, so after the source's
+    # snapshots were destroyed a new one can reuse a name still present on the target. Only a
+    # matching GUID means the target really holds this snapshot - otherwise skipping would report
+    # success while the target stays behind, and the bookmark would move to a snapshot it lacks.
+    sguid=$(zfs get -H -o value guid "$FROM" 2>/dev/null)
+    tguid=$(t_exec zfs get -H -o value guid "$T_DS@$SNAP" 2>/dev/null)
+    if [ -n "$sguid" ] && [ -n "$tguid" ] && [ "$sguid" != "$tguid" ]; then
+      die "cannot replicate $FROM into $T_DS: the target already has a different snapshot with the same name (@$SNAP) - left over from an earlier run whose source snapshot no longer exists. Nothing was changed. Destroy $T_DS@$SNAP if it is not needed, or reset replication for this target, then run again."
+    fi
     log "target already has @$SNAP - nothing to send"
     NOOP=1            # send-only re-runs, retries after a post-receive failure - still reconcile flags below
   fi
@@ -91,6 +121,7 @@ if t_dataset_exists "$T_DS"; then
         if ! t_dataset_exists "$T_DS"; then
           log "new child $d - full send"; pipe_send $WFLAG "$d@$SNAP" || die "send/receive of $d failed"
         elif zfs list -H -t bookmark -o name "$d#$BM_NAME" >/dev/null 2>&1; then
+          bm_check "$d#$BM_NAME" "$T_DS"; bm_explain $? "$d" "$T_DS"
           pipe_send $WFLAG -i "$d#$BM_NAME" "$d@$SNAP" || die "send/receive of $d failed"
         else
           die "no bookmark and no shared snapshot for $d - reset replication for this dataset"
@@ -98,6 +129,7 @@ if t_dataset_exists "$T_DS"; then
       done
       T_DS="$T_ROOT"
     else
+      bm_check "$BM" "$T_DS"; bm_explain $? "$SRC_DS" "$T_DS"
       pipe_send $WFLAG -i "$BM" "$FROM" || die "send/receive failed"
     fi
   else
