@@ -8,7 +8,7 @@
 <!ENTITY pluginURL "&gitURL;/shive.plg">
 <!ENTITY pkgURL    "https://github.com/heinrichchristopher/shive/releases/download/&version;">
 <!ENTITY pkgName   "shive-&version;-noarch-1.txz">
-<!ENTITY pkgMD5    "9dab084764ba4fef0511e3cbc309c494">
+<!ENTITY pkgMD5    "77d273e0f71c9ae1f36a9656a0213d8e">
 <!ENTITY plgPath   "/boot/config/plugins/&name;">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
 ]>

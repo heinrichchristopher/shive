@@ -22,9 +22,15 @@ chmod 0755 build/pkg/usr/local/emhttp/plugins/shive/scripts/shive-* build/pkg/us
 # for byte. Python's tarfile module sidesteps both problems: it never shells out to the platform's
 # tar binary, so the exact same interpreter code produces the exact same bytes on Linux and macOS.
 python3 - "$PKG" <<'PYEOF'
-import tarfile, os, sys
+import tarfile, os, sys, lzma, io
 pkg = sys.argv[1]
-with tarfile.open(f"build/{pkg}", "w:xz") as tf:
+# tarfile.open(mode="w:xz") leaves the compression preset/check to lzma's own defaults, which are
+# NOT guaranteed identical across Python/liblzma builds (macOS's bundled liblzma vs. Ubuntu's) even
+# for byte-identical input - the exact failure mode this reproducibility fix was supposed to close.
+# Pin every parameter explicitly so the compressed output depends only on the input bytes.
+filters = [{"id": lzma.FILTER_LZMA2, "preset": 6}]
+buf = io.BytesIO()
+with tarfile.open(fileobj=buf, mode="w") as tf:
     for root, dirs, files in os.walk("build/pkg"):
         dirs.sort()
         for name in sorted(files):
@@ -34,6 +40,8 @@ with tarfile.open(f"build/{pkg}", "w:xz") as tf:
             info.mtime = 0; info.uid = 0; info.gid = 0; info.uname = ""; info.gname = ""
             with open(path, "rb") as f:
                 tf.addfile(info, f)
+with open(f"build/{pkg}", "wb") as out:
+    out.write(lzma.compress(buf.getvalue(), format=lzma.FORMAT_XZ, check=lzma.CHECK_CRC32, filters=filters))
 PYEOF
 MD5=$(md5sum "build/$PKG" | cut -d' ' -f1)
 sed -i -e "s/<!ENTITY version   \"[^\"]*\">/<!ENTITY version   \"$VER\">/" \

@@ -756,3 +756,23 @@ produce byte-identical output - verified reproducible (two builds, identical MD5
 Directory entries are no longer written (only files - tar auto-creates parent directories on
 extraction, and the package tree has no genuinely empty directories), so the entry count dropped
 from 51 to 37; purely cosmetic; verified against the extracted tree, not against the entry count.
+
+## The build fix above was incomplete: xz compression itself isn't version-pinned (2026.09.24, cont.)
+
+Switching to Python's tarfile module removed the platform tar BINARY as a source of divergence,
+and was verified self-consistent (two builds, same sandbox, identical MD5) - but that only proves
+one machine agrees with itself. `tarfile.open(mode="w:xz")` delegates to Python's lzma module with
+no explicit preset/check, and those defaults are not guaranteed identical across different
+liblzma builds (macOS's bundled library vs. whatever ships on the GitHub Actions Ubuntu image) even
+for byte-identical input - a well-known class of problem in reproducible-builds work. This was the
+likely (not yet confirmed via an actual failed-run diff) cause of a second release failure after
+the first build.sh fix, from the same machine (a Mac) that exposed the first one.
+
+Fixed by building the tar stream in memory first (still fully pinned: sorted order, mtime/uid/gid/
+uname/gname all zeroed), then compressing it via `lzma.compress()` with an explicit filter chain
+(`FILTER_LZMA2, preset=6`) and explicit `check=CHECK_CRC32` - nothing left to a library default.
+Verified: self-consistent across two builds, valid per the standalone `xz` tool (not just Python's
+own reader), and the resulting archive extracts to a tree identical to the source (content and
+permissions) in this sandbox. Not yet confirmed against a genuinely different liblzma build, since
+this sandbox cannot produce one - the actual GitHub Actions failure log for the first attempt was
+requested to confirm the root cause rather than continuing to guess blind.
