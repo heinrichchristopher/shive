@@ -822,3 +822,50 @@ cases: normal, re-run of the same tag, stale local main re-tagged, main already 
 Also: actionlint added to the QC toolbox (both workflows clean), ci.yml's find|xargs made
 NUL-safe (SC2038), and every command the test job needs was mapped to a package present in its
 ubuntu:24.04 container. README/release.yml now say to `git pull` after each release.
+
+## Release workflow: dropped the "main has moved on" guard (2026-09-24, cont.)
+
+Hit in practice within a day of adding it. Sequence: I handed over an archive with
+shive.plg pre-built at version "2026.09.25" (my own dating mistake - it was still the 24th; the
+project's established convention is same-day suffixes ".1", ".2", ... not the next calendar date).
+The user committed that file as-is, but caught the date error before tagging and correctly tagged
+"2026.09.24.2" instead - so the tag and the committed version genuinely disagreed. The guard read
+that exactly as its intended protection case ("main has moved past this tag") and silently
+skipped, so main kept version "2026.09.25" forever while GitHub had a real, working release for
+"2026.09.24.2" - the release step itself stayed green throughout, so nothing in the Actions log
+looked wrong. Unraid installs from main, so it never saw an update.
+
+The guard could not distinguish "someone deliberately re-running an old tag" (what it was meant to
+prevent overwriting) from "the tag is simply what's correct and main is what's wrong" (what
+actually happened) - both look identical: tag version != main's committed version. Removed rather
+than made smarter: the workflow now unconditionally syncs main's shive.plg (version and MD5) to
+whichever tag was just released. Whatever was tagged most recently is what main - and so what
+Unraid installs - reflects, with no attempt to guess intent. Re-verified against all four scenarios
+from the first redesign (normal, re-run, stale local main, main ahead) plus this exact failure
+reproduced end to end (main at 2026.09.25, tag 2026.09.24.2, confirmed main gets corrected).
+
+## Container start order and post-start wait (2026-09-24/25)
+
+Stop and start both ran in discovery order, so a dependency chain (redis before the app) was luck.
+Added `order` and `wait` per container in `mappings.json`, next to the existing `ignore`/`datasets`
+overrides - a dependency is a property of the containers, not of a schedule, so per-container and
+global beats per-schedule (which would have to be restated in every schedule and could be made
+self-contradictory). Start is ascending by order; **stop is its exact reverse**, derived rather
+than configured separately, because a second list could drift out of sync with the first. Equal
+order keeps the name-sorted discovery order, so runs stay deterministic. `wait` sleeps after a
+container that actually came up, and is skipped on the last one (it would only delay the run's end).
+Values are clamped and sanitised in `docker_mappings_save()` rather than trusting the browser's
+own field limits, as with every other GUI-written config. `state_get()` now forwards extra jq
+arguments (needed for the per-container `--arg n` lookup).
+
+**Bug found while testing this:** a dry-run set `.quiesced=true` before its DRY-RUN branch, i.e.
+claimed containers were stopped when nothing was, and never retired its state file (finalize's
+cleanup was inside `if [ "$DRY_RUN" != 1 ]`). `shive-recover` keys off exactly `quiesced &&
+!resumed` to find a run that died with containers down - so a dry-run killed halfway looked
+identical to that and made recover "resume" containers nothing had ever stopped. Now only real
+runs set the flag, and a dry-run removes its state file on exit.
+
+**Second bug, introduced by that fix and caught by the suite immediately:** `guard_resume` returns
+early unless `.quiesced` is true - which a dry-run no longer sets, so the dry-run silently stopped
+showing its start plan. Dry-runs now bypass that guard: the preview is the entire point of a
+dry-run.

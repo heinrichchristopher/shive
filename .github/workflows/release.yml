@@ -42,32 +42,39 @@ jobs:
       - name: Build the package for this tag (this build is authoritative)
         run: ./build.sh "${GITHUB_REF_NAME}"
 
-      - name: Make the shive.plg on main carry this build's MD5
+      - name: Make the shive.plg on main match this release (version + MD5)
         run: |
           md5=$(md5sum "build/shive-${GITHUB_REF_NAME}-noarch-1.txz" | cut -d' ' -f1)
-          echo "MD5 of the package this release publishes: $md5"
+          echo "Version/MD5 this release publishes: ${GITHUB_REF_NAME} / $md5"
           # Work on main in a SEPARATE worktree: this job's own checkout is the tag (detached), and
           # build.sh has just modified shive.plg in it - switching that checkout to main fails with
           # "local changes would be overwritten" whenever main's shive.plg differs from the tag's
           # (e.g. after an earlier auto-correct commit). A worktree never touches this checkout.
+          #
+          # Unconditional: whichever tag was pushed most recently is what main - and so what
+          # Unraid installs from - reflects, without trying to guess whether that's "expected".
+          # An earlier version only touched the MD5 and skipped entirely when main's version
+          # entity didn't already match the tag ("main has moved on, not touching it") - meant to
+          # protect against overwriting newer work with a stale re-tagged version, but in practice
+          # it silently did nothing the one time a tag and the committed version genuinely
+          # disagreed (a same-day version bump that used a different naming step than what was
+          # committed) - exactly the case a human re-tagging to fix a mistake needs this workflow
+          # to just follow, not second-guess.
           git fetch --depth=1 origin main
           wt=$(mktemp -d)/main      # unique path: no clash with leftovers on a reused runner
           git worktree add -f "$wt" origin/main
           cd "$wt"
-          ver=$(grep -oP '(?<=<!ENTITY version   ")[^"]+' shive.plg)
-          if [ "$ver" != "${GITHUB_REF_NAME}" ]; then
-            echo "main's shive.plg is at version '$ver', not ${GITHUB_REF_NAME} - main has moved on; not touching it."
-            exit 0
-          fi
-          # change ONLY the MD5 line - main may carry other edits to shive.plg made after the tag
-          sed -i "s/<!ENTITY pkgMD5    \"[^\"]*\">/<!ENTITY pkgMD5    \"$md5\">/" shive.plg
+          sed -i \
+            -e "s/<!ENTITY version   \"[^\"]*\">/<!ENTITY version   \"${GITHUB_REF_NAME}\">/" \
+            -e "s/<!ENTITY pkgMD5    \"[^\"]*\">/<!ENTITY pkgMD5    \"$md5\">/" \
+            shive.plg
           if git diff --quiet -- shive.plg; then
-            echo "main already carries this MD5 - nothing to correct."
+            echo "main already matches this release - nothing to correct."
             exit 0
           fi
           git diff -- shive.plg
           git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" \
-              commit -qm "Set package MD5 for ${GITHUB_REF_NAME} [skip ci]" -- shive.plg
+              commit -qm "Sync main to release ${GITHUB_REF_NAME} [skip ci]" -- shive.plg
           git push origin HEAD:main
 
       - name: Publish

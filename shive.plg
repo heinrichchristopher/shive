@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "shive">
 <!ENTITY author    "heinrichchristopher">
-<!ENTITY version   "2026.09.25">
+<!ENTITY version   "2026.09.24.2">
 <!ENTITY launch    "Settings/Shive">
 <!ENTITY gitURL    "https://raw.githubusercontent.com/heinrichchristopher/shive/main">
 <!ENTITY pluginURL "&gitURL;/shive.plg">
@@ -18,6 +18,19 @@
         support="https://github.com/heinrichchristopher/shive/issues">
 
 <CHANGES>
+###2026.09.24.2 (release workflow only, no plugin functionality changed)
+- Fix: the release workflow refused to sync main's shive.plg when the tagged version didn't
+  already match what was committed there - meant to protect against re-running a stale old tag,
+  but it also silently ignored the correct, deliberate case (a same-day version tagged
+  differently than what got committed), leaving Unraid unable to see the update despite a
+  fully successful, published release. Now unconditional: main always ends up matching
+  whichever tag was released most recently.
+###2026.09.24 (later, container ordering)
+- Containers tab: per-container start order and optional wait after start. Containers are started
+  in ascending order and stopped in the exact reverse order, so dependencies (e.g. a database
+  before its app) come up and go down in the right sequence.
+- Fix: a dry-run marked the run as having stopped containers and left its state file behind, so an
+  interrupted dry-run could make the crash-recovery pass "restart" containers nothing had stopped.
 ###2026.09.24 (build fix, no plugin functionality changed)
 - build.sh now packages via Python's tarfile module instead of GNU-tar-specific flags, so it
   produces byte-identical packages on macOS and Linux alike (needed for releasing from a Mac).
