@@ -117,7 +117,9 @@ finalize() {
     notify normal "Shive [$SCHED_NAME${SEND_ONLY:+ / $SEND_ONLY send}]: success" "$summary"
   fi
   # persist compact last-status to flash (small file, once per run), then retire the state file
-  if [ "$DRY_RUN" != 1 ]; then
+  if [ "$DRY_RUN" = 1 ]; then
+    rm -f "$STATE_FILE"        # a dry-run changed nothing: leave no state behind to be recovered
+  else
     mkdir -p "$SHIVE_PLG/state"
     jq '{schedule,mode,started,finished,status,snapshot,containers:[.containers[]|.name],resume_failed:(.resume_failed//[]),sends,errors,warnings,log}' \
       "$STATE_FILE" > "$SHIVE_PLG/state/$STATEKEY.last.json"

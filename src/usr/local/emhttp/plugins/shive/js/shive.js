@@ -264,9 +264,11 @@ var Shive = (function () {
               '<td class="shive-mono">' + (c.override === 'ignore' ? '<i>ignored</i>' : c.datasets.map(esc).join('<br>') || '<span class="shive-err">unresolved</span>') + '</td>' +
               '<td class="shive-mono shive-hint">' + c.mounts.map(esc).join('<br>') + '</td>' +
               '<td><input type="text" class="ov-ds" data-name="' + esc(n) + '" value="' + esc((o.datasets || []).join(',')) + '" style="width:100%"></td>' +
-              '<td><input type="checkbox" class="ov-ignore" data-name="' + esc(n) + '"' + (o.ignore ? ' checked' : '') + '></td></tr>';
+              '<td><input type="checkbox" class="ov-ignore" data-name="' + esc(n) + '"' + (o.ignore ? ' checked' : '') + '></td>' +
+              '<td><input type="number" class="ov-order" data-name="' + esc(n) + '" value="' + (o.order || 0) + '" min="0" max="999" style="width:5rem"></td>' +
+              '<td><input type="number" class="ov-wait" data-name="' + esc(n) + '" value="' + (o.wait || 0) + '" min="0" max="600" style="width:5rem"></td></tr>';
           });
-          $('#ctr-rows').html(rows.join('') || '<tr><td colspan="6">no containers</td></tr>');
+          $('#ctr-rows').html(rows.join('') || '<tr><td colspan="8">no containers</td></tr>');
           $('#ctr-msg').text('scanned ' + new Date(r.updated * 1000).toLocaleTimeString());
         });
       });
@@ -275,6 +277,11 @@ var Shive = (function () {
       var m = {};
       $('.ov-ds').each(function () { var v = $(this).val().split(',').map($.trim).filter(Boolean); if (v.length) m[$(this).data('name')] = { datasets: v }; });
       $('.ov-ignore:checked').each(function () { m[$(this).data('name')] = $.extend(m[$(this).data('name')] || {}, { ignore: true }); });
+      // only store a non-default order/wait, so mappings.json stays a list of actual overrides
+      $('.ov-order, .ov-wait').each(function () {
+        var v = parseInt($(this).val(), 10), n = $(this).data('name'), k = $(this).hasClass('ov-order') ? 'order' : 'wait';
+        if (v > 0) { m[n] = m[n] || {}; m[n][k] = v; }
+      });
       post('mappings_save', { mappings: JSON.stringify(m) }).done(function () { toast('Overrides saved.'); ctr.load(true); });
     }
   };

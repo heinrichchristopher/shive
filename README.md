@@ -167,6 +167,14 @@ entered there manually; containers that must never be stopped can be set to "ign
 
 Without Docker awareness the snapshot runs straight through - containers are never touched.
 
+**Start order and wait.** Each container can be given a *start order* and a *wait after start* in
+the Containers tab. Containers come back up in ascending order (0 = unspecified, name-sorted among
+equals) and are **stopped in the exact reverse order**, since whatever starts last depends on what
+came before it: `paperless-redis = 10`, `paperless-ngx = 20` starts redis first and stops the app
+first. The wait pauses that many seconds before the next container starts, for a dependency that
+needs a moment to become ready; it is skipped after the last one. Both are properties of the
+container, so they apply to every schedule it appears in.
+
 ### Replication
 
 Two independent targets per schedule:

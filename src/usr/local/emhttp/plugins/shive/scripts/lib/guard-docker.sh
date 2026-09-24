@@ -14,10 +14,21 @@ guard_prepare() {
   log "linked containers: $(jq -r 'length' <<<"$list") (running: $(jq '[.[]|select(.running)]|length' <<<"$list")): $(jq -r '[.[]|.name]|join(", ")' <<<"$list")"
 }
 
+# Start order comes from the per-container "order" (Containers tab); stopping is its exact
+# reverse, because what starts last depends on what started before it and must go first.
+# Equal order keeps discovery order (name-sorted), which is stable across runs.
+start_order() { state_get '[.containers[]|select(.running)]|sort_by(.order // 0)|.[].name'; }
+stop_order()  { state_get '[.containers[]|select(.running)]|sort_by(.order // 0)|reverse|.[].name'; }
+wait_after()  { state_get --arg n "$1" '[.containers[]|select(.name==$n)|.wait // 0][0] // 0'; }
+
 guard_quiesce() {
-  local running; running=$(state_get '[.containers[]|select(.running)|.name]|.[]')
+  local running; running=$(stop_order)
   [ -z "$running" ] && { log "no running linked containers - nothing to stop"; return 0; }
-  state_set '.quiesced=true | .resumed=false'   # crash after this point => recover will resume
+  log "stop order: $(printf '%s ' $running)"
+  # Only a real run may claim the containers are down: shive-recover keys off quiesced && !resumed
+  # to decide whether an interrupted run left containers stopped. A dry-run that is killed halfway
+  # would otherwise look exactly like that and make recover "resume" containers nothing ever stopped.
+  [ "$DRY_RUN" = 1 ] || state_set '.quiesced=true | .resumed=false'
   local c fail=0
   for c in $running; do
     if [ "$DRY_RUN" = 1 ]; then
@@ -48,15 +59,30 @@ guard_quiesce() {
 }
 
 guard_resume() {
-  [ "$(state_get '.quiesced')" = true ] || return 0
-  [ "$(state_get '.resumed')"  = true ] && return 0
-  local c fail=0 failed=()
-  for c in $(state_get '[.containers[]|select(.running)|.name]|.[]'); do
-    if [ "$DRY_RUN" = 1 ]; then log "DRY-RUN: docker start $c"; continue; fi
+  # A dry-run deliberately never sets .quiesced (see guard_quiesce), but must still show what it
+  # would start, in which order - that preview is the whole point of a dry-run.
+  if [ "$DRY_RUN" != 1 ]; then
+    [ "$(state_get '.quiesced')" = true ] || return 0
+    [ "$(state_get '.resumed')"  = true ] && return 0
+  fi
+  local c fail=0 failed=() w
+  local order; order=$(start_order)
+  log "start order: $(printf '%s ' $order)"
+  for c in $order; do
+    w=$(wait_after "$c")
+    if [ "$DRY_RUN" = 1 ]; then
+      log "DRY-RUN: docker start $c$( [ "${w:-0}" -gt 0 ] && echo " (then wait ${w}s)" )"; continue
+    fi
     local i
     for i in 1 2 3; do docker start "$c" >/dev/null 2>&1 && break; sleep $((i*${RESUME_RETRY_DELAY:-5})); done
     if docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null | grep true >/dev/null; then
       log "resumed container $c"
+      # Give a dependency time to become ready before the next container starts. Only after a
+      # container that actually came up, and never on the last one - waiting there would just
+      # delay the run's end for nobody.
+      if [ "${w:-0}" -gt 0 ] && [ "$c" != "${order##*$'\n'}" ]; then
+        log "waiting ${w}s after $c before starting the next container"; sleep "$w"
+      fi
     else
       failed+=("$c"); fail=1
     fi

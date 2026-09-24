@@ -12,6 +12,21 @@ function docker_mappings(): array {
   return is_array($m) ? $m : [];
 }
 function docker_mappings_save(array $m): void {
+  // Written by the GUI, so sanitise here rather than trusting the browser's own field limits:
+  // keep only known keys, clamp the numbers, drop entries that carry nothing.
+  $clean = [];
+  foreach ($m as $name => $ov) {
+    if (!is_string($name) || $name === '' || !is_array($ov)) continue;
+    $e = [];
+    if (!empty($ov['ignore'])) $e['ignore'] = true;
+    if (!empty($ov['datasets']) && is_array($ov['datasets']))
+      $e['datasets'] = array_values(array_filter(array_map('trim', $ov['datasets']),
+        fn($d) => (bool)preg_match('#^[a-zA-Z0-9][\w.\-]*(/[\w.\-]+)*$#', $d)));
+    foreach (['order' => 999, 'wait' => 600] as $k => $max)
+      if (($v = max(0, min($max, (int)($ov[$k] ?? 0)))) > 0) $e[$k] = $v;
+    if ($e) $clean[$name] = $e;
+  }
+  $m = $clean;
   shive_atomic_write(SHIVE_PLG . '/mappings.json', json_encode($m, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
 }
 /* resolve one bind-mount source path to a zfs dataset name (or null) */
@@ -57,13 +72,17 @@ function docker_discover(bool $refresh = false): array {
         $d = docker_path_to_dataset($mt['Source'], $pools);
         if ($d) $ds[$d] = true;
       }
-      $containers[$name] = ['name' => $name, 'running' => $running === 'true', 'datasets' => array_keys($ds), 'mounts' => $paths, 'override' => null];
+      $containers[$name] = ['name' => $name, 'running' => $running === 'true', 'datasets' => array_keys($ds), 'mounts' => $paths, 'override' => null, 'order' => 0, 'wait' => 0];
     }
   }
   foreach (docker_mappings() as $name => $ov) {
-    if (!isset($containers[$name])) $containers[$name] = ['name' => $name, 'running' => false, 'datasets' => [], 'mounts' => [], 'override' => null, 'missing' => true];
+    if (!isset($containers[$name])) $containers[$name] = ['name' => $name, 'running' => false, 'datasets' => [], 'mounts' => [], 'override' => null, 'order' => 0, 'wait' => 0, 'missing' => true];
     if (!empty($ov['ignore'])) { $containers[$name]['datasets'] = []; $containers[$name]['override'] = 'ignore'; }
     elseif (!empty($ov['datasets'])) { $containers[$name]['datasets'] = array_values($ov['datasets']); $containers[$name]['override'] = 'manual'; }
+    // Start order and post-start wait. A dependency ("redis before the app") is a property of the
+    // containers, not of a schedule, so it lives here next to the other per-container overrides.
+    $containers[$name]['order'] = max(0, min(999, (int)($ov['order'] ?? 0)));
+    $containers[$name]['wait']  = max(0, min(600, (int)($ov['wait'] ?? 0)));
   }
   ksort($containers);
   $byDs = [];
@@ -95,7 +114,8 @@ function docker_linked(array $datasets, bool $recursive, bool $refresh = true, a
     foreach ($c['datasets'] as $d) {
       if ($isExcluded($d)) continue;
       foreach ($datasets as $t) {
-        if ($d === $t || ($recursive && str_starts_with($d, $t . '/'))) { $out[] = ['name' => $c['name'], 'running' => $c['running']]; continue 3; }
+        if ($d === $t || ($recursive && str_starts_with($d, $t . '/')))
+          { $out[] = ['name' => $c['name'], 'running' => $c['running'], 'order' => $c['order'] ?? 0, 'wait' => $c['wait'] ?? 0]; continue 3; }
       }
     }
   }

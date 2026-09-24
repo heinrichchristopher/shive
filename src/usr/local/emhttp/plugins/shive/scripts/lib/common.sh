@@ -71,7 +71,7 @@ state_init() {
       containers:[],snapshot:"",sends:{},errors:[],warnings:[]}' > "$STATE_FILE"
 }
 state_set() { local f="$1"; shift; local tmp; tmp=$(mktemp); jq "$f" "$@" "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE" || { rm -f "$tmp"; return 1; }; }
-state_get() { jq -r "$1" "$STATE_FILE"; }
+state_get() { local f="$1"; shift; jq -r "$f" "$@" "$STATE_FILE"; }   # extra args -> jq (e.g. --arg)
 phase() { state_set '.phase=$p' --arg p "$1"; log "phase: $1"; }
 add_error()   { state_set '.errors += [$e]'   --arg e "$1"; log "ERROR: $1"; }
 add_warning() { state_set '.warnings += [$w]' --arg w "$1"; log "WARN: $1"; }

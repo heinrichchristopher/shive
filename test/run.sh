@@ -495,6 +495,51 @@ for i in $IDQ $IDR $IDO; do php -r "require '$SRC/include/config.php'; shive_sch
 for d in pin/qc pin/qc-dr pin/qcr minikeg/qcbk tank/qcr; do zfs destroy -r $d >/dev/null 2>&1; done
 : > /tmp/notify.log
 
+sec "container start order and post-start wait"
+zfs create pin/ord >/dev/null 2>&1
+for c in ordapp orddb ordproxy; do mkdir -p /mnt/pin/ord/$c; done
+cat > /tmp/fakedocker.json <<'EOF'
+{"ordapp":{"running":true,"mounts":[{"Type":"bind","Source":"/mnt/pin/ord/ordapp","Destination":"/d"}]},
+ "orddb":{"running":true,"mounts":[{"Type":"bind","Source":"/mnt/pin/ord/orddb","Destination":"/d"}]},
+ "ordproxy":{"running":true,"mounts":[{"Type":"bind","Source":"/mnt/pin/ord/ordproxy","Destination":"/d"}]}}
+EOF
+echo '{"orddb":{"order":10},"ordapp":{"order":20},"ordproxy":{"order":30}}' > /boot/config/plugins/shive/mappings.json
+IDN=$(php_save '["name"=>"Order","datasets"=>["pin/ord"],"recursive"=>true,"docker_aware"=>true]')
+: > /tmp/docker.log; RESUME_RETRY_DELAY=0 $S/shive-run $IDN --no-send --no-prune >/dev/null 2>&1
+check "started in ascending order"                        "[ \"\$(grep '^start ' /tmp/docker.log | awk '{print \$2}' | tr '\n' ' ')\" = 'orddb ordapp ordproxy ' ]"
+check "stopped in the exact reverse order"                "[ \"\$(grep '^stop ' /tmp/docker.log | awk '{print \$NF}' | tr '\n' ' ')\" = 'ordproxy ordapp orddb ' ]"
+# wait applies between containers, but never after the last one
+echo '{"orddb":{"order":10,"wait":2},"ordapp":{"order":20},"ordproxy":{"order":30,"wait":30}}' > /boot/config/plugins/shive/mappings.json
+T0=$(date +%s); sleep 1; RESUME_RETRY_DELAY=0 $S/shive-run $IDN --no-send --no-prune >/tmp/ord.log 2>&1; EL=$(( $(date +%s) - T0 ))
+check "wait after a container is honoured"                "grep -q 'waiting 2s after orddb' /tmp/ord.log"
+check "wait on the LAST container is skipped"             "! grep -q 'waiting 30s' /tmp/ord.log && [ $EL -lt 15 ]"
+check "dry-run shows the order without waiting"           "$S/shive-run $IDN --dry-run 2>&1 | grep -q 'DRY-RUN: docker start orddb (then wait 2s)'"
+# order survives an ignored container, and unspecified order stays name-stable
+echo '{"orddb":{"order":10},"ordapp":{"order":20},"ordproxy":{"ignore":true}}' > /boot/config/plugins/shive/mappings.json
+: > /tmp/docker.log; sleep 1; RESUME_RETRY_DELAY=0 $S/shive-run $IDN --no-send --no-prune >/dev/null 2>&1
+check "ignored container drops out, order of the rest holds" "[ \"\$(grep '^start ' /tmp/docker.log | awk '{print \$2}' | tr '\n' ' ')\" = 'orddb ordapp ' ]"
+echo '{}' > /boot/config/plugins/shive/mappings.json
+: > /tmp/docker.log; sleep 1; RESUME_RETRY_DELAY=0 $S/shive-run $IDN --no-send --no-prune >/dev/null 2>&1
+check "no order set: name-stable, stop still mirrors start"  "[ \"\$(grep '^start ' /tmp/docker.log | awk '{print \$2}' | tr '\n' ' ')\" = 'ordapp orddb ordproxy ' ] && [ \"\$(grep '^stop ' /tmp/docker.log | awk '{print \$NF}' | tr '\n' ' ')\" = 'ordproxy orddb ordapp ' ]"
+# hostile/garbage values must never reach the stored mappings
+# a dry-run must not look like an interrupted real run to shive-recover
+$S/shive-run $IDN --dry-run >/dev/null 2>&1
+check "dry-run leaves no runtime state behind"            "[ \"\$(ls /var/local/shive/state/$IDN.json 2>/dev/null | wc -l)\" = 0 ]"
+$S/shive-run $IDN --dry-run >/dev/null 2>&1 & sleep 0.3; kill -9 %1 2>/dev/null; wait 2>/dev/null
+: > /tmp/docker.log; $S/shive-recover --quiet >/dev/null 2>&1
+check "an interrupted dry-run triggers no bogus recovery" "[ \"\$(grep -c '^start ' /tmp/docker.log)\" = 0 ]"
+check "order/wait clamped and junk rejected on save"      "A POST 'op=mappings_save&mappings={\"x\":{\"order\":\"9999\",\"wait\":-5},\"y\":{\"order\":\"abc\"}}' | jq -e .ok && [ \"\$(jq -r '.x.order' /boot/config/plugins/shive/mappings.json)\" = 999 ] && jq -e '.x.wait==null and .y==null' /boot/config/plugins/shive/mappings.json"
+echo '{}' > /boot/config/plugins/shive/mappings.json
+php -r "require '$SRC/include/config.php'; shive_schedule_delete('$IDN');" >/dev/null 2>&1
+zfs destroy -r pin/ord >/dev/null 2>&1; rm -rf /mnt/pin/ord
+cat > /tmp/fakedocker.json <<'EOF'
+{"paperless":{"running":true,"mounts":[{"Type":"bind","Source":"/mnt/user/appdata/paperless","Destination":"/data"}]},
+ "grafana":{"running":true,"mounts":[{"Type":"bind","Source":"/mnt/pin/appdata/grafana","Destination":"/g"}]},
+ "stopped1":{"running":false,"mounts":[{"Type":"bind","Source":"/mnt/pin/appdata/paperless","Destination":"/x"}]},
+ "unrelated":{"running":true,"mounts":[{"Type":"bind","Source":"/mnt/tank/media","Destination":"/m"}]}}
+EOF
+: > /tmp/notify.log
+
 sec "crash recovery"
 # Set up our own container state rather than relying on an earlier section's cleanup: the fake
 # docker does a read-modify-write, so a late write from a previous (deliberately killed) run can
