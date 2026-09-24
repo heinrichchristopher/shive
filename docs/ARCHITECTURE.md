@@ -801,3 +801,24 @@ Bug caught before shipping this: the first draft of the correction logic did
 original mismatched file instead of the correction - overwriting the fix with the bug it was meant
 to fix. Corrected to save the built (correct) file to a path outside the repo before switching
 branches, then copy it back in.
+
+## Release workflow, second redesign of the MD5 correction (2026-09-24)
+
+The first self-correcting version switched the job's own checkout (the tag, detached, with
+shive.plg just modified by build.sh) to `main` via `git checkout -B main origin/main`. That only
+works while main's shive.plg is identical to the tag's. It fails with "local changes would be
+overwritten by checkout" as soon as they differ - which is exactly the state after one earlier run
+already pushed a correction and the next tag is made from a stale local main (whose push was
+rejected as non-fast-forward, easy to miss in a terminal). Reproduced with a local emulation (bare
+origin, tag push, shallow detached checkout like actions/checkout@v4, the workflow's own `run:`
+steps extracted from the YAML and executed verbatim).
+
+Rewritten: the correction runs in a separate `git worktree` of origin/main (unique temp path), so
+the tag checkout is never touched; it changes only the pkgMD5 line on main (main may carry later
+edits to shive.plg); it leaves main alone if main's version is not this tag (main moved on); it is
+idempotent (no commit when main already carries the MD5). Verified in the emulation for four
+cases: normal, re-run of the same tag, stale local main re-tagged, main already on a newer version.
+
+Also: actionlint added to the QC toolbox (both workflows clean), ci.yml's find|xargs made
+NUL-safe (SC2038), and every command the test job needs was mapped to a package present in its
+ubuntu:24.04 container. README/release.yml now say to `git pull` after each release.

@@ -7,6 +7,7 @@ name: Release
 #      workflow's build (see below), only the version number matters going in
 #   2. git commit -am "release 2026.09.24" && git push
 #   3. git tag 2026.09.24 && git push origin 2026.09.24
+#   4. afterwards: git pull  (this workflow may have pushed an MD5 correction to main)
 #
 # Users install from the shive.plg on `main`, so that file must end up with the MD5 of the exact
 # package this workflow publishes as a release asset. That package is built HERE, on this runner -
@@ -41,25 +42,33 @@ jobs:
       - name: Build the package for this tag (this build is authoritative)
         run: ./build.sh "${GITHUB_REF_NAME}"
 
-      - name: Correct shive.plg on main if this build's MD5 differs from what's committed
+      - name: Make the shive.plg on main carry this build's MD5
         run: |
-          if git diff --quiet -- shive.plg; then
-            echo "Committed shive.plg already matches this build - nothing to correct."
-          else
-            echo "Committed shive.plg did not match this runner's build - correcting main:"
-            git diff -- shive.plg
-            cp shive.plg /tmp/corrected-shive.plg    # save before switching branches, see below
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git fetch origin main
-            git checkout -B main origin/main
-            cp /tmp/corrected-shive.plg shive.plg    # overwrite main's copy with the correct one -
-                                                       # NOT `git checkout <tag> -- shive.plg`, which
-                                                       # would restore the original mismatched file
-            git add shive.plg
-            git commit -m "Auto-correct package MD5 for ${GITHUB_REF_NAME} [skip ci]"
-            git push origin main
+          md5=$(md5sum "build/shive-${GITHUB_REF_NAME}-noarch-1.txz" | cut -d' ' -f1)
+          echo "MD5 of the package this release publishes: $md5"
+          # Work on main in a SEPARATE worktree: this job's own checkout is the tag (detached), and
+          # build.sh has just modified shive.plg in it - switching that checkout to main fails with
+          # "local changes would be overwritten" whenever main's shive.plg differs from the tag's
+          # (e.g. after an earlier auto-correct commit). A worktree never touches this checkout.
+          git fetch --depth=1 origin main
+          wt=$(mktemp -d)/main      # unique path: no clash with leftovers on a reused runner
+          git worktree add -f "$wt" origin/main
+          cd "$wt"
+          ver=$(grep -oP '(?<=<!ENTITY version   ")[^"]+' shive.plg)
+          if [ "$ver" != "${GITHUB_REF_NAME}" ]; then
+            echo "main's shive.plg is at version '$ver', not ${GITHUB_REF_NAME} - main has moved on; not touching it."
+            exit 0
           fi
+          # change ONLY the MD5 line - main may carry other edits to shive.plg made after the tag
+          sed -i "s/<!ENTITY pkgMD5    \"[^\"]*\">/<!ENTITY pkgMD5    \"$md5\">/" shive.plg
+          if git diff --quiet -- shive.plg; then
+            echo "main already carries this MD5 - nothing to correct."
+            exit 0
+          fi
+          git diff -- shive.plg
+          git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" \
+              commit -qm "Set package MD5 for ${GITHUB_REF_NAME} [skip ci]" -- shive.plg
+          git push origin HEAD:main
 
       - name: Publish
         uses: softprops/action-gh-release@v2

@@ -463,6 +463,9 @@ git tag 2026.09.24 && git push origin 2026.09.24
 Running `./build.sh 2026.09.24` locally first is optional - only useful if you want a package to
 test with before tagging. Its own computed MD5 does not need to match what CI produces.
 
+If the MD5 needed correcting, the workflow pushes a commit "Set package MD5 for <tag> [skip ci]"
+to `main`. Run `git pull` after every release, or your next push is rejected as non-fast-forward.
+
 ## Third-party assets
 
 The logo is the "Cask" icon by [justicon](https://www.flaticon.com/authors/justicon) from
