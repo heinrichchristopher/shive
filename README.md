@@ -446,19 +446,22 @@ icons/                          logo sources (colour = plugin manager/README, li
 
 ## Releasing
 
-The package MD5 lives in the committed `shive.plg`, because that is the file users install from.
-So the version must be built and committed *before* it is tagged:
+The package MD5 lives in `shive.plg`, because that is the file users install from. The release
+workflow builds the package itself and is authoritative for that MD5 - it corrects `shive.plg` on
+`main` automatically if the committed value doesn't match its own build, rather than requiring it
+to already match. (An earlier version of this workflow required an exact match up front and failed
+otherwise; that assumed identical machines produce byte-identical *compressed* packages, which
+isn't true in practice - different xz/liblzma builds, e.g. macOS's vs. the CI runner's, can encode
+identical input differently.)
+
+So releasing is just:
 
 ```bash
-./build.sh 2026.09.12          # patches version + MD5 into shive.plg, builds build/<pkg>.txz
-git commit -am "release 2026.09.12"
-git push
-git tag 2026.09.12 && git push origin 2026.09.12
+git tag 2026.09.24 && git push origin 2026.09.24
 ```
 
-The release workflow rebuilds from the tag and refuses to publish if the committed `shive.plg`
-doesn't match, so a mismatched checksum fails the release instead of reaching users. Packages are
-byte-reproducible (fixed sort order, mtime and ownership), which is what makes that check meaningful.
+Running `./build.sh 2026.09.24` locally first is optional - only useful if you want a package to
+test with before tagging. Its own computed MD5 does not need to match what CI produces.
 
 ## Third-party assets
 

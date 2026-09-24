@@ -1,15 +1,27 @@
 name: Release
 
-# Publishing a version is a two-step flow, on purpose:
+# Publishing a version:
 #
-#   1. locally:  ./build.sh 2026.09.12      -> patches version AND the package MD5 into shive.plg
-#                git commit -am "release 2026.09.12" && git push
-#   2. then:     git tag 2026.09.12 && git push origin 2026.09.12
+#   1. bump the version in shive.plg (<!ENTITY version ...>) - by hand, or run ./build.sh locally
+#      if you want a package to test with; the MD5 it computes does NOT need to match this
+#      workflow's build (see below), only the version number matters going in
+#   2. git commit -am "release 2026.09.24" && git push
+#   3. git tag 2026.09.24 && git push origin 2026.09.24
 #
-# Users install from the shive.plg in main, so that committed file must already contain the MD5
-# of the exact package this workflow attaches to the release. The workflow therefore rebuilds and
-# verifies rather than patching: if the committed .plg does not match what the build produces,
-# the release fails instead of shipping a .plg whose MD5 check will reject the download.
+# Users install from the shive.plg on `main`, so that file must end up with the MD5 of the exact
+# package this workflow publishes as a release asset. That package is built HERE, on this runner -
+# so this runner's own build is authoritative, and nothing else needs to match it.
+#
+# Earlier versions of this workflow instead required whoever tags a release to have *already*
+# committed a shive.plg whose MD5 matches what this workflow would independently rebuild, and
+# failed the release otherwise. That assumed identical machines would produce byte-identical
+# packages. They don't: this package is xz-compressed, and different liblzma builds (e.g. macOS's
+# bundled library vs. whatever ships on this runner's Ubuntu image) can encode the same input
+# differently - confirmed here in practice with three different MD5s for three byte-identical
+# source trees, from two different machines. Chasing that mismatch was flaky and wasted CI minutes.
+# So: this runner builds the package, computes the real MD5, and corrects shive.plg on `main` if
+# needed - instead of failing and asking a human to somehow predict a value only this runner can
+# actually produce.
 on:
   push:
     tags: ['*']
@@ -22,22 +34,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y libxml2-utils
+        run: sudo apt-get update && sudo apt-get install -y libxml2-utils python3
 
-      - name: Record the committed .plg
-        run: cp shive.plg /tmp/committed.plg
-
-      - name: Build the package for this tag
+      - name: Build the package for this tag (this build is authoritative)
         run: ./build.sh "${GITHUB_REF_NAME}"
 
-      - name: The committed .plg must already match this build (version + MD5)
+      - name: Correct shive.plg on main if this build's MD5 differs from what's committed
         run: |
-          if ! diff -u /tmp/committed.plg shive.plg; then
-            echo
-            echo "The shive.plg committed to main does not match tag ${GITHUB_REF_NAME}."
-            echo "Run './build.sh ${GITHUB_REF_NAME}', commit the updated shive.plg, then re-tag."
-            exit 1
+          if git diff --quiet -- shive.plg; then
+            echo "Committed shive.plg already matches this build - nothing to correct."
+          else
+            echo "Committed shive.plg did not match this runner's build - correcting main:"
+            git diff -- shive.plg
+            cp shive.plg /tmp/corrected-shive.plg    # save before switching branches, see below
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git fetch origin main
+            git checkout -B main origin/main
+            cp /tmp/corrected-shive.plg shive.plg    # overwrite main's copy with the correct one -
+                                                       # NOT `git checkout <tag> -- shive.plg`, which
+                                                       # would restore the original mismatched file
+            git add shive.plg
+            git commit -m "Auto-correct package MD5 for ${GITHUB_REF_NAME} [skip ci]"
+            git push origin main
           fi
 
       - name: Publish

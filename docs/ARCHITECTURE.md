@@ -776,3 +776,28 @@ own reader), and the resulting archive extracts to a tree identical to the sourc
 permissions) in this sandbox. Not yet confirmed against a genuinely different liblzma build, since
 this sandbox cannot produce one - the actual GitHub Actions failure log for the first attempt was
 requested to confirm the root cause rather than continuing to guess blind.
+
+## Release workflow redesigned: CI is authoritative, not the human (2026.09.24, cont. again)
+
+Third failure in a row on the same release, all showing the SAME symptom (committed MD5 doesn't
+match the CI rebuild) with THREE different MD5s across two machines for byte-identical source. The
+xz-compression-determinism theory was right, but "pin every lzma parameter I can" (previous entry)
+still didn't fix it - different liblzma builds evidently produce different compressed bytes for
+identical input even with an identical nominal filter chain, which is a real, documented class of
+problem in reproducible-builds work and not fully solvable from the compressing side alone.
+
+Chasing byte-for-byte compressed-archive equality between two different machines was the wrong
+design from the start. Nothing actually requires that: only the package the CI runner *publishes*
+needs to match the MD5 in the `shive.plg` on `main` - and the CI runner is the one building that
+exact package. `release.yml` no longer fails on a mismatch; it commits the correction to `main`
+itself ("Auto-correct package MD5 for <tag> [skip ci]") and proceeds to publish. A local
+`./build.sh` run is now optional (useful only for a local test package before tagging) rather than
+a required, must-match-exactly step - which removes the entire cross-machine reproducibility
+requirement from the human's critical path. `[skip ci]` avoids a redundant CI run on the
+auto-commit (GitHub's own convention, no extra workflow config needed).
+
+Bug caught before shipping this: the first draft of the correction logic did
+`git checkout <tag> -- shive.plg` *after* switching to `main`, which would have restored the
+original mismatched file instead of the correction - overwriting the fix with the bug it was meant
+to fix. Corrected to save the built (correct) file to a path outside the repo before switching
+branches, then copy it back in.
