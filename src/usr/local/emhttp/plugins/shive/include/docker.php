@@ -78,13 +78,25 @@ function zfs_pools_simple(): array {
   return $o;
 }
 /* containers linked to a dataset set (recursive => children count too) -> [{name,running}] */
-function docker_linked(array $datasets, bool $recursive, bool $refresh = true): array {
+// A dataset excluded from the snapshot contributes nothing to it - stopping a container purely
+// for that dataset's consistency would be downtime with no matching backup benefit. $exclude
+// mirrors the schedule's own "excluded from the snapshot itself" rule (is_excluded() in shell):
+// a mount under an excluded dataset no longer counts as a reason to link the container, but a
+// container with another, non-excluded mount is still linked for that mount's sake.
+function docker_linked(array $datasets, bool $recursive, bool $refresh = true, array $exclude = []): array {
   $disc = docker_discover($refresh);
   $out = [];
+  $isExcluded = function (string $d) use ($exclude): bool {
+    foreach ($exclude as $x) if ($x !== '' && ($d === $x || str_starts_with($d, $x . '/'))) return true;
+    return false;
+  };
   foreach ($disc['containers'] as $c) {
     if (!empty($c['missing'])) continue;
-    foreach ($c['datasets'] as $d) foreach ($datasets as $t) {
-      if ($d === $t || ($recursive && str_starts_with($d, $t . '/'))) { $out[] = ['name' => $c['name'], 'running' => $c['running']]; continue 3; }
+    foreach ($c['datasets'] as $d) {
+      if ($isExcluded($d)) continue;
+      foreach ($datasets as $t) {
+        if ($d === $t || ($recursive && str_starts_with($d, $t . '/'))) { $out[] = ['name' => $c['name'], 'running' => $c['running']]; continue 3; }
+      }
     }
   }
   return $out;

@@ -32,7 +32,7 @@ switch ($cmd) {
   case 'linked':
     $s = shive_schedule_resolve($argv[2] ?? '');
     if (!$s) { fwrite(STDERR, "schedule not found\n"); exit(1); }
-    $out(docker_linked($s['datasets'], $s['recursive'])); break;
+    $out(docker_linked($s['datasets'], $s['recursive'], true, $s['exclude_datasets'])); break;
   case 'linked-dataset': $out(docker_linked([$argv[2] ?? ''], true)); break;
   case 'locations':   // <dataset> <snapshot-name> -> every copy of that snapshot
     $out(shive_snapshot_locations($argv[2] ?? '', $argv[3] ?? '')); break;

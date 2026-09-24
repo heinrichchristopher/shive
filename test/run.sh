@@ -38,7 +38,7 @@ EOF
 A() { php "$HERE/apitest.php" "$@" 2>/dev/null; }
 php_save() { php -r "require '$SRC/include/config.php'; \$r=shive_schedule_save($1); echo \$r['ok'] ? \$r['schedule']['id'] : 'ERR:'.implode(';',\$r['errors']);"; }
 S="$SRC/scripts"
-LOGDIR_T="/var/log/shive/housekeeping-test"
+LOGDIR_T="/var/log/shive/abcdef"   # a schedule-id-shaped dir: housekeeping only touches those
 
 reset
 zfs create pin && zfs create pin/appdata && zfs create pin/appdata/paperless && zfs create pin/appdata/grafana
@@ -107,6 +107,11 @@ $S/shive-recover --quiet >/dev/null 2>&1
 check "run logs are capped, newest kept"                   "[ \"\$(ls '$LOGDIR_T' | wc -l)\" -le 200 ] && [ -f '$LOGDIR_T/old-1.log' ]"
 check "retired state files are capped, newest kept"        "[ \"\$(ls /var/local/shive/state/*.done.json 2>/dev/null | wc -l)\" -le 50 ] && [ -f /var/local/shive/state/housekeep1.done.json ]"
 rm -rf "$LOGDIR_T" /var/local/shive/state/housekeep*.done.json
+
+sec "static rules"
+# `... | grep -q` under pipefail: grep exits at the first match, the writer can get SIGPIPE, and
+# the pipeline then reports failure although grep matched (the 2026-09-24 intermittent failure).
+check "no grep -q inside a pipeline in any script"           "! grep -rn '|[[:space:]]*(\\?grep -[a-zA-Z]*q' $S $S/lib | grep -v '^[^:]*:[0-9]*:[[:space:]]*#'"
 
 sec "the snapshot tag prefix is derived in PHP only"
 check "run, send and prune all read .tag_prefix"           "[ \"\$(grep -c 'tag_prefix' $S/shive-run $S/shive-send $S/shive-prune | grep -c ':[1-9]')\" = 3 ]"
@@ -376,6 +381,118 @@ sleep 1; $S/shive-run $IDB --no-prune >/dev/null 2>&1
 check "reason reaches the recorded error, not just the log"          "jq -e '.errors|any(test(\"no longer exists on the target\"))' /boot/config/plugins/shive/state/$IDB.last.json"
 zfs destroy -r pin/bl >/dev/null 2>&1; zfs destroy -r minikeg/bl >/dev/null 2>&1
 php -r "require '$SRC/include/config.php'; shive_schedule_delete('$IDB');" >/dev/null 2>&1
+: > /tmp/notify.log
+
+sec "excluded dataset also excludes its container from stop/resume (field question 2026-09-24)"
+zfs create pin/appdata/excltest >/dev/null 2>&1; echo x > /mnt/pin/appdata/excltest/x 2>/dev/null || true
+mkdir -p /mnt/user/appdata; ln -sfn /mnt/pin/appdata/excltest /mnt/user/appdata/excltest 2>/dev/null
+python3 -c "
+import json
+d = json.load(open('/tmp/fakedocker.json'))
+d['excltest'] = {'running': True, 'mounts': [{'Type':'bind','Source':'/mnt/user/appdata/excltest','Destination':'/c'}]}
+json.dump(d, open('/tmp/fakedocker.json','w'))
+"
+IDE=$(php_save '["name"=>"ExclLinked","datasets"=>["pin/appdata"],"recursive"=>true,"docker_aware"=>true]')
+check "container linked before any exclusion"                "$S/shive-run $IDE --dry-run 2>&1 | grep -q 'DRY-RUN: docker stop -t [0-9]* excltest'"
+php -r "require '$SRC/include/config.php'; \$s=shive_schedule_load('$IDE'); \$s['exclude_datasets']=['pin/appdata/excltest']; shive_schedule_save(\$s);"
+check "excluded dataset's container is no longer stopped"    "! $S/shive-run $IDE --dry-run 2>&1 | grep -q 'docker stop -t [0-9]* excltest'"
+check "excluded dataset's container is no longer resumed"    "! $S/shive-run $IDE --dry-run 2>&1 | grep -q 'docker start excltest'"
+check "editor preview (op=linked with unsaved excludes) agrees" "A GET 'op=linked&datasets=[\"pin/appdata\"]&recursive=1&exclude_datasets=[\"pin/appdata/excltest\"]' | jq -e '[.containers[].name]|index(\"excltest\")|not'"
+# edge cases: excluding a dataset must not over- or under-reach
+zfs create pin/appdata/excltest/sub >/dev/null 2>&1; mkdir -p /mnt/pin/appdata/excltest/sub
+python3 -c "
+import json
+d = json.load(open('/tmp/fakedocker.json'))
+d['ex_child'] = {'running': True, 'mounts': [{'Type':'bind','Source':'/mnt/pin/appdata/excltest/sub','Destination':'/c'}]}
+d['ex_mixed'] = {'running': True, 'mounts': [{'Type':'bind','Source':'/mnt/pin/appdata/excltest','Destination':'/c'},{'Type':'bind','Source':'/mnt/pin/appdata/paperless','Destination':'/p'}]}
+json.dump(d, open('/tmp/fakedocker.json','w'))
+"
+LNK=$(php -r "require '$SRC/include/config.php'; require '$SRC/include/docker.php'; echo implode(',', array_column(docker_linked(['pin/appdata'], true, true, ['pin/appdata/excltest']), 'name'));")
+check "mount below an excluded dataset is excluded too"       "! echo ',$LNK,' | grep -q ',ex_child,'"
+check "container with a non-excluded mount is still stopped"  "echo ',$LNK,' | grep -q ',ex_mixed,'"
+check "restoring an excluded dataset still quiesces its users" "php $SRC/include/cli.php linked-dataset pin/appdata/excltest | jq -e '[.[].name]|index(\"excltest\")'"
+python3 -c "
+import json
+d = json.load(open('/tmp/fakedocker.json'))
+d.pop('ex_child', None); d.pop('ex_mixed', None)
+json.dump(d, open('/tmp/fakedocker.json','w'))
+"
+python3 -c "
+import json
+d = json.load(open('/tmp/fakedocker.json'))
+d.pop('excltest', None)
+json.dump(d, open('/tmp/fakedocker.json','w'))
+"
+zfs destroy -r pin/appdata/excltest >/dev/null 2>&1
+php -r "require '$SRC/include/config.php'; shive_schedule_delete('$IDE');" >/dev/null 2>&1
+
+sec "QC 2026-09-24: full-code bug hunt"
+# --- resume that only succeeds on the retry from finalize: no false "still DOWN" alarm
+zfs create pin/qc >/dev/null 2>&1; mkdir -p /mnt/pin/qc/app /mnt/user/appdata; ln -sfn /mnt/pin/qc/app /mnt/user/appdata/qcapp
+echo '{"qcflaky":{"running":true,"start_fail":3,"mounts":[{"Type":"bind","Source":"/mnt/pin/qc/app","Destination":"/d"}]}}' > /tmp/fakedocker.json
+IDQ=$(php_save '["name"=>"QC","datasets"=>["pin/qc"],"recursive"=>false,"docker_aware"=>true]')
+RESUME_RETRY_DELAY=0 $S/shive-run $IDQ --no-send --no-prune >/dev/null 2>&1
+check "late-successful resume: no stale resume_failed"      "jq -e '.resume_failed==[] and .errors==[] and .status==\"warning\"' /boot/config/plugins/shive/state/$IDQ.last.json"
+check "container really is running"                         "jq -e '.qcflaky.running' /tmp/fakedocker.json"
+echo '{"qcflaky":{"running":true,"start_fail":99,"mounts":[{"Type":"bind","Source":"/mnt/pin/qc/app","Destination":"/d"}]}}' > /tmp/fakedocker.json
+sleep 1; RESUME_RETRY_DELAY=0 $S/shive-run $IDQ --no-send --no-prune >/dev/null 2>&1
+check "genuinely failed resume still alerts, one error"     "jq -e '.resume_failed==[\"qcflaky\"] and (.errors|length)==1' /boot/config/plugins/shive/state/$IDQ.last.json"
+echo '{}' > /tmp/fakedocker.json
+# --- two schedules must not write into the same destination
+check "cross-schedule destination collision rejected"       "A POST 'op=schedule_save&schedule={\"name\":\"clash\",\"datasets\":[\"pin/appdata\"],\"local_target\":{\"enabled\":true,\"dataset\":\"minikeg/backup\"}}' | jq -e '.ok==false and (.errors[0]|test(\"collides\"))'"
+# --- restore: truthful rollback, writable DR result, trace-free dry-run
+zfs destroy -r pin/qc >/dev/null 2>&1; zfs create pin/qc; echo v1 > /mnt/pin/qc/f; zfs snapshot pin/qc@a; zfs snapshot pin/qc@b
+: > /tmp/notify.log; $S/shive-restore dataset --snapshot pin/qc@a --method rollback --yes >/dev/null 2>&1
+check "rollback takes no pre-restore snapshot it would destroy" "! zfs list -H -t snapshot -o name pin/qc | grep -q prerestore"
+check "rollback notification says there is no undo point"  "grep -q 'no undo point' /tmp/notify.log"
+zfs create minikeg/qcbk >/dev/null 2>&1; zfs snapshot pin/qc@c; zfs send -R pin/qc@c | zfs receive -u -o readonly=on minikeg/qcbk/qc
+$S/shive-restore dr --target local --snapshot minikeg/qcbk/qc@c --to pin/qc-dr --recursive >/dev/null 2>&1
+check "DR result is writable (readonly not carried over)"   "[ \"\$(zfs get -H -o value readonly pin/qc-dr)\" = off ]"
+mkdir -p /mnt/pin/qc/sub; echo x > /mnt/pin/qc/sub/y; zfs snapshot pin/qc@d
+$S/shive-restore file --snapshot pin/qc@d --path sub --dest /mnt/pin/qc/sub --mode copy --dry-run >/dev/null 2>&1
+check "file-restore dry-run creates no directory"          "! ls -d /mnt/pin/qc/sub.shive-restore-* >/dev/null 2>&1"
+# --- restore and backup run exclude each other
+sleep 60 & LIVEQ=$!
+jq -n --arg p "$LIVEQ" '{schedule:"restore-pin-qc",pid:($p|tonumber),phase:"QUIESCE"}' > /var/local/shive/state/restore-pin-qc.json
+sleep 1; $S/shive-run $IDQ --no-prune >/dev/null 2>&1
+check "backup run skips while a dataset restore runs"       "jq -e '.warnings|any(test(\"restore is in progress\"))' /boot/config/plugins/shive/state/$IDQ.last.json"
+rm -f /var/local/shive/state/restore-pin-qc.json
+jq -n --arg p "$LIVEQ" --arg s "$IDQ" '{schedule:$s,pid:($p|tonumber),phase:"SEND_LOCAL"}' > /var/local/shive/state/$IDQ.json
+check "dataset restore refuses while a backup run runs"     "$S/shive-restore dataset --snapshot pin/qc@a --yes 2>&1 | grep -q 'backup run is in progress'"
+rm -f /var/local/shive/state/$IDQ.json; kill $LIVEQ 2>/dev/null
+# --- the Delete button must not remove the replication base on a backup target
+IDR=$(php_save '["name"=>"QCdel","datasets"=>["pin/qc"],"recursive"=>false,"local_target"=>["enabled"=>true,"dataset"=>"minikeg/qcbk"]]')
+zfs destroy -r minikeg/qcbk/qc >/dev/null 2>&1
+$S/shive-run $IDR --no-prune >/dev/null 2>&1; sleep 1; $S/shive-run $IDR --no-prune >/dev/null 2>&1
+QN=$(zfs list -H -t snapshot -o name -s creation minikeg/qcbk/qc | tail -1); QO=$(zfs list -H -t snapshot -o name -s creation minikeg/qcbk/qc | grep shive- | head -1)
+check "deleting the newest on a target is refused"          "$S/shive-snapshot destroy --snapshot $QN --yes 2>&1 | grep -q 'next backup continues from it'"
+check "deleting an older one on the target is allowed"      "$S/shive-snapshot destroy --snapshot $QO --yes >/dev/null 2>&1"
+# --- recovery hints name the remote host; stuck resume token explains zfs receive -A
+zfs create tank/qcr >/dev/null 2>&1; zfs create tank/qcr/qc >/dev/null 2>&1
+QS=$(zfs list -H -t snapshot -o name -d 1 pin/qc | grep shive- | tail -1)
+check "remote recovery hint says where to run it"           "$S/shive-send --sched $IDR --from $QS --to ssh://root@fakehost:22/tank/qcr/qc 2>&1 | grep -q 'first on fakehost'"
+python3 -c "import json; s=json.load(open('/tmp/fakezfs.json')); s['ds']['minikeg/qcbk/qc']['token']='1-dead'; json.dump(s,open('/tmp/fakezfs.json','w'))"
+check "stuck resume token explains zfs receive -A"          "$S/shive-send --sched $IDR --from $QS --to local:minikeg/qcbk/qc 2>&1 | grep -q 'zfs receive -A'"
+# --- dry-run shows the orphan sweep
+zfs create pin/qcr >/dev/null 2>&1; zfs create pin/qcr/c >/dev/null 2>&1
+IDO=$(php_save '["name"=>"QCorph","datasets"=>["pin/qcr"],"recursive"=>true]')
+zfs snapshot -r pin/qcr@shive-$IDO-01010001-0001; zfs destroy pin/qcr@shive-$IDO-01010001-0001
+check "dry-run lists the orphan sweep"                      "$S/shive-prune --sched $IDO --location source --dataset pin/qcr --recursive --dry-run 2>&1 | grep -q 'would sweep orphaned'"
+check "... and does not actually sweep"                     "zfs list -H -o name pin/qcr/c@shive-$IDO-01010001-0001"
+# --- settings are code (sourced by bash): validated server-side
+check "hostile setting rejected"                            "A POST 'op=config_save&config={\"SSH_OPTS\":\"-o X=\$(id)\"}' | jq -e '.ok==false'"
+check "non-numeric timeout rejected"                        "A POST 'op=config_save&config={\"DOCKER_STOP_TIMEOUT\":\"abc\"}' | jq -e '.ok==false'"
+check "valid settings saved and read back by bash"          "A POST 'op=config_save&config={\"DOCKER_STOP_TIMEOUT\":\"61\"}' | jq -e .ok && bash -c 'source /boot/config/plugins/shive/shive.cfg; [ \"\$DOCKER_STOP_TIMEOUT\" = 61 ]'"
+A POST 'op=config_save&config={"DOCKER_STOP_TIMEOUT":"60"}' >/dev/null
+# --- log access and housekeeping only touch schedule-id directories
+mkdir -p /var/log/shive/foreign; for i in $(seq 1 205); do touch -d "-$i min" /var/log/shive/foreign/f$i.log; done
+$S/shive-recover --quiet
+check "housekeeping leaves foreign log dirs alone"          "[ \"\$(ls /var/log/shive/foreign | wc -l)\" = 205 ]"
+check "foreign logs are not readable via the API"           "A GET 'op=log&schedule=foreign&file=f1.log' | jq -e '.ok==false'"
+rm -rf /var/log/shive/foreign
+check "browse refuses .. segments"                          "A GET 'op=browse&target=local&path=/mnt/pin/qc/.zfs/snapshot/a/../../../../../etc' | jq -e '.ok==false'"
+for i in $IDQ $IDR $IDO; do php -r "require '$SRC/include/config.php'; shive_schedule_delete('$i');" >/dev/null 2>&1; done
+for d in pin/qc pin/qc-dr pin/qcr minikeg/qcbk tank/qcr; do zfs destroy -r $d >/dev/null 2>&1; done
 : > /tmp/notify.log
 
 sec "crash recovery"

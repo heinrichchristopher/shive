@@ -77,7 +77,7 @@ var Shive = (function () {
       var render = function (id, list) {
         var was = $('#' + id + ' input:checked').map(function () { return this.value; }).get();
         $('#' + id).html(list.map(function (n) {
-          return '<label><input type="checkbox" value="' + esc(n) + '"' + (was.indexOf(n) >= 0 ? ' checked' : '') +
+          return '<label><input type="checkbox" class="shive-excl" value="' + esc(n) + '"' + (was.indexOf(n) >= 0 ? ' checked' : '') +
                  (id === 'f-exclude' ? ' onchange="Shive.sched.excludeUI()"' : '') + '>' + esc(n) + '</label>';
         }).join('') || '<span class="shive-hint">no child datasets</span>');
       };
@@ -92,6 +92,9 @@ var Shive = (function () {
         render(id, sendable);
         if (!sendable.length) $('#' + id).html('<span class="shive-hint">nothing left to skip – every child dataset is already excluded from the snapshot</span>');
       });
+      // A snapshot exclusion changes which containers get stopped. If the linked-containers
+      // preview is already on screen, refresh it rather than leave a list that is now wrong.
+      if ($('#f-linked').data('shown')) sched.showLinked();
     },
     excluded: function (id) { return $('#' + id + ' input:checked').map(function () { return this.value; }).get(); },
     setExcluded: function (id, list) {
@@ -128,7 +131,7 @@ var Shive = (function () {
       $('#f-enabled').prop('checked', s ? s.enabled : true);
       $('#f-ds-filter').val(''); sched.filterDs(); sched.setDs(s ? s.datasets : []); $('#f-recursive').prop('checked', s ? s.recursive : true);
       $('#f-frequency').val(s ? s.frequency : 'daily'); $('#f-time').val(s ? s.time : '03:00'); $('#f-weekday').val(s ? s.weekday : 0); $('#f-monthday').val(s ? s.monthday : 1); $('#f-cron').val(s ? s.cron : '');
-      $('#f-docker').prop('checked', s ? s.docker_aware : false); $('#f-linked').text('');
+      $('#f-docker').prop('checked', s ? s.docker_aware : false); $('#f-linked').text('').data('shown', false);
       sched.excludeUI();
       sched.setExcluded('f-exclude', s ? s.exclude_datasets : []);
       sched.excludeUI();   // again: the target lists are filtered by the snapshot exclusions just set
@@ -189,15 +192,19 @@ var Shive = (function () {
       if (dry) go(); else confirm('Run "' + sched.nameOf(id) + '" now?', 'Linked containers will be stopped briefly if Docker awareness is enabled.', go, 'Run now');
     },
     showLinked: function () {
+      // several requests can be in flight when exclusions are ticked quickly; only the newest one
+      // may write the result, or a slow older response would overwrite a newer, correct state
+      var seq = (sched._linkedSeq = (sched._linkedSeq || 0) + 1);
       var c = sched.collect();
       if (!c.datasets.length) { $('#f-linked').text('select datasets first'); return; }
-      $('#f-linked').text('scanning…');
+      $('#f-linked').data('shown', true).text('scanning…');
       // op=linked applies the same docker_linked() rule the job itself uses - deliberately not
       // reimplemented here, so the preview can't disagree with what actually gets stopped
-      get('linked', { datasets: JSON.stringify(c.datasets), recursive: c.recursive ? 1 : 0 }).done(function (r) {
+      get('linked', { datasets: JSON.stringify(c.datasets), recursive: c.recursive ? 1 : 0, exclude_datasets: JSON.stringify(c.exclude_datasets || []) }).done(function (r) {
+        if (seq !== sched._linkedSeq) return;
         var names = (r.containers || []).map(function (ct) { return ct.name + (ct.running ? '' : ' (stopped)'); });
         $('#f-linked').html(names.length ? 'Linked: ' + names.map(esc).join(', ') : 'No containers found on these datasets – check the Containers tab.');
-      }).fail(function () { $('#f-linked').text('could not determine linked containers'); });
+      }).fail(function () { if (seq === sched._linkedSeq) $('#f-linked').text('could not determine linked containers'); });
     },
     // spec passed to the target_parent_* ops: 'local' target uses the dataset directly,
     // 'remote' builds the ssh spec from whatever is currently typed (mirrors testRemote())
@@ -374,7 +381,7 @@ var Shive = (function () {
     },
     restoreDataset: function (full) {
       var method = window.confirm('OK = COPY-BACK (rsync --delete from snapshot into the live dataset; keeps all snapshots)\nCancel = ROLLBACK (zfs rollback -r; instant, but DESTROYS every snapshot newer than this one)') ? 'rsync' : 'rollback';
-      var typed = prompt('Full restore of\n' + full + '\nmethod: ' + method + '\n\nLinked containers will be stopped and restarted, a pre-restore snapshot is taken first.\nType RESTORE to confirm:');
+      var typed = prompt('Full restore of\n' + full + '\nmethod: ' + method + '\n\nLinked containers will be stopped and restarted. ' + (method === 'rollback' ? 'ROLLBACK HAS NO UNDO: every newer snapshot and bookmark is destroyed, and replication of this dataset may need a reset.' : 'A pre-restore snapshot is taken first, so this can be undone.') + '\nType RESTORE to confirm:');
       if (typed !== 'RESTORE') return;
       $('#b-out').show(); $('#b-out-pre').text('running – this can take a while…');
       post('restore_dataset', { snapshot: full, method: method, confirm: 1 }).done(function (r) { $('#b-out-pre').text(r.output); toast(r.ok ? 'Dataset restored.' : 'Restore failed – see output.', r.ok); });

@@ -133,6 +133,12 @@ trap 'log "signal received - aborting"; exit 130' INT TERM
 # ---- PRECHECK ---------------------------------------------------------------
 phase PRECHECK
 array_started || { add_error "array not started"; exit 1; }
+# A dataset restore in progress has its own containers stopped and is rewriting live data - a
+# snapshot now would capture a half-restored state, and our resume would start its containers.
+busy=$(active_runs | grep '^restore-' | head -1)
+if [ -n "$busy" ] && [ -z "$SEND_ONLY" ]; then
+  add_warning "a dataset restore is in progress ($busy) - this run was skipped, the next scheduled run takes over"; exit 0
+fi
 # A source dataset that is gone (deliberately destroyed, pool not imported) must not take the
 # whole schedule down with it - the other datasets still need their snapshots. Skip it with a
 # warning and carry on; only an empty remainder is a hard failure.
@@ -247,11 +253,11 @@ guard_resume || log "resume reported failures - continuing with sends, alert fol
 fi
 
 # ---- SEND -------------------------------------------------------------------
-# shellcheck disable=SC2046  # the $( ... && echo --flag ) idiom below relies on word splitting
-#                               to add optional arguments; the values are fixed literals
 # shive-send explains a failure on its own FATAL line in the shared run log; carry that reason into
 # the recorded error so it reaches the notification and the History tab, not just the log file.
 send_failure_reason() { grep -o 'FATAL: .*' "$LOG_FILE" 2>/dev/null | tail -1 | sed 's/^FATAL: //; s/\.$//'; }
+# shellcheck disable=SC2046  # the $( ... && echo --flag ) idiom below relies on word splitting
+#                               to add optional arguments; the values are fixed literals
 do_send() { # <location> <target-root-spec> <excluded...>
   local loc="$1" root="$2"; shift 2
   local excl=("$@") ok=1 ds tgt spec r

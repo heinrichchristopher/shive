@@ -45,13 +45,15 @@ PLAN=$(t_exec zfs list -H -p -o name,creation,shive:important -t snapshot -d 1 "
 # Recursive schedules: a child snapshot whose parent-level twin is gone (manual non-recursive
 # delete, or an interrupted destroy) would otherwise never be seen again - retention only
 # classifies the top level. Sweep them now so they cannot accumulate.
-if [ $REC = 1 ] && [ "$DRY_RUN" != 1 ]; then
+if [ $REC = 1 ]; then
   parent_snaps=$(t_exec zfs list -H -o name -t snapshot -d 1 "$DS" 2>/dev/null | sed 's/^[^@]*@//' | (grep "^${PREFIX}" || true))
   while IFS= read -r child; do
     [ -n "$child" ] || continue
     sn="${child#*@}"
-    printf '%s\n' "$parent_snaps" | grep -qx "$sn" && continue
+    printf '%s\n' "$parent_snaps" | grep -x "$sn" >/dev/null && continue
     [ "$(t_exec zfs get -H -o value shive:important "$child" 2>/dev/null)" = 1 ] && continue
+    # a dry-run must show everything a real run would destroy, not just the classified snapshots
+    if [ "$DRY_RUN" = 1 ]; then log "DRY-RUN: would sweep orphaned child snapshot $child"; continue; fi
     t_exec zfs destroy "$child" && log "swept orphaned child snapshot $child" || log "orphan sweep failed: $child"
   done < <(t_exec zfs list -H -o name -t snapshot -r "$DS" 2>/dev/null | grep -v "^$DS@" | grep "@${PREFIX}" || true)
 fi

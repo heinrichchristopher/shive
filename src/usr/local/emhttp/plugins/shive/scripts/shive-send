@@ -58,15 +58,18 @@ bm_check() {
   local bm="$1" tds="$2" bmguid newest
   bmguid=$(zfs get -H -o value guid "$bm" 2>/dev/null) || return 0      # can't tell: let receive decide
   [ -n "$bmguid" ] && [ "$bmguid" != "-" ] || return 0
-  t_exec zfs list -H -o guid -t snapshot -d 1 "$tds" 2>/dev/null | grep -qx "$bmguid" || return 1
+  t_exec zfs list -H -o guid -t snapshot -d 1 "$tds" 2>/dev/null | grep -x "$bmguid" >/dev/null || return 1
   newest=$(t_exec zfs list -H -o guid -s creation -t snapshot -d 1 "$tds" 2>/dev/null | tail -1)
   [ "$newest" = "$bmguid" ] || return 2
   return 0
 }
+# Recovery commands in messages must say WHERE to run them - on a remote target, typing them on
+# this server does nothing (or the wrong thing).
+on_target() { [ "$T_TYPE" = ssh ] && echo " on $T_HOST" || echo ""; }
 bm_explain() { # <rc from bm_check> <source dataset> <target dataset>
   case "$1" in
-    1) die "cannot continue replication of $2 into $3: the last snapshot sent there - the one this schedule's bookmark points to - no longer exists on the target (deleted there by hand or by a tool other than Shive; Shive's own retention always keeps the newest snapshot). No other snapshot is shared with the source any more, so there is no incremental base left. Nothing was changed. To recover, reset replication for this target: move or destroy $3 (check it first: zfs list -t all -r $3); the next run then sends a full copy." ;;
-    2) die "cannot continue replication of $2 into $3: the target has a snapshot newer than the last one Shive sent (the one this schedule's bookmark points to) - created on the target by hand or by another tool. zfs receive only continues from the target's newest snapshot. Nothing was changed. Destroy the newer snapshot(s) on $3 that did not come from Shive, then run again." ;;
+    1) die "cannot continue replication of $2 into $3: the last snapshot sent there - the one this schedule's bookmark points to - no longer exists on the target (deleted there - by hand, with another tool, or via the Delete button - Shive's own retention always keeps the newest snapshot). No other snapshot is shared with the source any more, so there is no incremental base left. Nothing was changed. To recover, reset replication for this target$(on_target): move or destroy $3 (check it first: zfs list -t all -r $3); the next run then sends a full copy." ;;
+    2) die "cannot continue replication of $2 into $3: the target has a snapshot newer than the last one Shive sent (the one this schedule's bookmark points to) - created on the target by hand or by another tool. zfs receive only continues from the target's newest snapshot. Nothing was changed. Destroy the newer snapshot(s) on $3$(on_target) that did not come from Shive, then run again." ;;
   esac
 }
 
@@ -75,14 +78,14 @@ if t_dataset_exists "$T_DS"; then
   token=$(t_exec zfs get -H -o value receive_resume_token "$T_DS" 2>/dev/null || echo "-")
   if [ "$token" != "-" ] && [ -n "$token" ]; then
     log "resume token found on target - resuming interrupted stream"
-    pipe_send -t "$token" || die "resuming interrupted stream failed"
+    pipe_send -t "$token" || die "an interrupted transfer into $T_DS could not be resumed (typically because its source snapshot no longer exists). Every run will keep failing here until the partial state is discarded$(on_target): zfs receive -A $T_DS - that removes only the incomplete transfer, never already received snapshots; the next run then continues normally"
   fi
 fi
 
 # 2./3./4./5. pick base and send
 if t_dataset_exists "$T_DS"; then
   mapfile -t tsnaps < <(t_snap_names "$T_DS" | grep "^$PREFIX" || true)
-  if printf '%s\n' "${tsnaps[@]}" | grep -qx "$SNAP"; then
+  if printf '%s\n' "${tsnaps[@]}" | grep -x "$SNAP" >/dev/null; then
     # Same NAME is not the same snapshot: the name only carries the minute, so after the source's
     # snapshots were destroyed a new one can reuse a name still present on the target. Only a
     # matching GUID means the target really holds this snapshot - otherwise skipping would report
@@ -90,7 +93,7 @@ if t_dataset_exists "$T_DS"; then
     sguid=$(zfs get -H -o value guid "$FROM" 2>/dev/null)
     tguid=$(t_exec zfs get -H -o value guid "$T_DS@$SNAP" 2>/dev/null)
     if [ -n "$sguid" ] && [ -n "$tguid" ] && [ "$sguid" != "$tguid" ]; then
-      die "cannot replicate $FROM into $T_DS: the target already has a different snapshot with the same name (@$SNAP) - left over from an earlier run whose source snapshot no longer exists. Nothing was changed. Destroy $T_DS@$SNAP if it is not needed, or reset replication for this target, then run again."
+      die "cannot replicate $FROM into $T_DS: the target already has a different snapshot with the same name (@$SNAP) - left over from an earlier run whose source snapshot no longer exists. Nothing was changed. Destroy $T_DS@$SNAP$(on_target) if it is not needed, or reset replication for this target, then run again."
     fi
     log "target already has @$SNAP - nothing to send"
     NOOP=1            # send-only re-runs, retries after a post-receive failure - still reconcile flags below
@@ -98,7 +101,7 @@ if t_dataset_exists "$T_DS"; then
   base=""
   [ "${NOOP:-0}" = 1 ] || for s in $(snap_names "$SRC_DS" | grep "^$PREFIX" | tac); do   # newest source snapshot first
     [ "$s" = "$SNAP" ] && continue
-    if printf '%s\n' "${tsnaps[@]}" | grep -qx "$s"; then base="$s"; break; fi
+    if printf '%s\n' "${tsnaps[@]}" | grep -x "$s" >/dev/null; then base="$s"; break; fi
   done
   if [ "${NOOP:-0}" = 1 ]; then
     :
@@ -106,7 +109,7 @@ if t_dataset_exists "$T_DS"; then
     # zfs receive refuses an incremental if the target's NEWEST snapshot isn't the base
     # (e.g. a pre-restore or manual snapshot taken on the target) - say so plainly.
     newest_t=$(t_exec zfs list -H -o name -s creation -t snapshot -d 1 "$T_DS" 2>/dev/null | tail -1 | sed 's/.*@//')
-    [ "$newest_t" = "$base" ] || die "target $T_DS has a snapshot newer than the shared base @$base (newest: @$newest_t) - zfs receive would refuse it; destroy the newer target snapshot(s) or reset replication"
+    [ "$newest_t" = "$base" ] || die "target $T_DS has a snapshot newer than the shared base @$base (newest: @$newest_t) - zfs receive would refuse it. Nothing was changed. Destroy the newer snapshot(s) on $T_DS$(on_target), or reset replication for this target"
     log "incremental base: @$base (shared)"
     pipe_send $RFLAG $WFLAG -I "@$base" "$FROM" || die "send/receive failed"
   elif zfs list -H -t bookmark -o name "$BM" >/dev/null 2>&1; then
@@ -134,9 +137,9 @@ if t_dataset_exists "$T_DS"; then
     fi
   else
     if [ ${#tsnaps[@]} -eq 0 ]; then
-      die "target $T_DS exists but has never received anything from us (no shive-* snapshots) - likely pre-created empty. Safe to remove and retry: t_exec zfs destroy $T_DS (only if it truly has no data/snapshots you want - check first: zfs list -t all -r $T_DS)"
+      die "target $T_DS exists but has never received anything from this schedule (no $PREFIX* snapshots) - probably created by hand beforehand. zfs receive cannot write into an existing dataset. Check it first$(on_target): zfs list -t all -r $T_DS - if it holds nothing you need, destroy it (zfs destroy -r $T_DS) and run again; the first run then creates it itself"
     fi
-    die "target $T_DS exists and has other snapshots but shares none with $SRC_DS - reset replication (destroy target) to start over"
+    die "target $T_DS exists and has snapshots of this schedule, but none is shared with $SRC_DS any more and there is no bookmark to continue from. Nothing was changed. Reset replication for this target$(on_target): move or destroy $T_DS; the next run then sends a full copy"
   fi
 else
   log "target absent - full send"
@@ -176,6 +179,10 @@ if [ "$DRY_RUN" != 1 ]; then
 fi
 if [ "$DRY_RUN" != 1 ]; then
   for d in $( [ $REC = 1 ] && zfs list -H -r -o name "$SRC_DS" || echo "$SRC_DS" ); do
+    # The old bookmark is the only way back to an incremental once the shared snapshot is pruned.
+    # Bookmark names can't be swapped atomically, so at least never drop it for a dataset that
+    # has no @$SNAP to bookmark (e.g. a child created after the snapshot was taken).
+    zfs list -H -o name "$d@$SNAP" >/dev/null 2>&1 || { log "no @$SNAP on $d - keeping its previous bookmark"; continue; }
     zfs destroy "$d#$BM_NAME" >/dev/null 2>&1 || true
     zfs bookmark "$d@$SNAP" "$d#$BM_NAME" || log "WARN: could not create bookmark $d#$BM_NAME"
   done

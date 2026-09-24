@@ -29,3 +29,12 @@
 .shive .shive-dslist{max-height:16rem;overflow:auto;border:1px solid var(--gray-300,#ccc);border-radius:4px;padding:.3rem .5rem;min-width:24rem;margin:.3rem 0}
 .shive .shive-dslist label{display:block;font-family:monospace;font-size:.9em;white-space:nowrap;cursor:pointer}
 .shive .shive-dslist input{margin-right:.4rem}
+/* Exclusion checkboxes deliberately don't look like normal "select to include" checkboxes -
+   checked here means "leave this out", so a native checkmark would read backwards. Shown as a
+   red box with a white minus instead; unchecked stays a plain empty box like any checkbox at rest.
+   The minus is a background SVG rather than ::after: pseudo-elements on <input> render only in
+   some browsers, a background image on an appearance:none input renders in all of them. */
+.shive .shive-dslist input.shive-excl{appearance:none;-webkit-appearance:none;-moz-appearance:none;width:.95em;height:.95em;margin:0 .4rem 0 0;border:1px solid var(--gray-400,#999);border-radius:2px;vertical-align:-.12em;cursor:pointer;background:transparent no-repeat center/70% 70%}
+.shive .shive-dslist input.shive-excl:hover{border-color:var(--red-500,#d9534f)}
+.shive .shive-dslist input.shive-excl:focus-visible{outline:2px solid var(--red-500,#d9534f);outline-offset:1px}
+.shive .shive-dslist input.shive-excl:checked{background-color:var(--red-500,#d9534f);border-color:var(--red-500,#d9534f);background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Crect x='1.5' y='4.2' width='7' height='1.6' fill='%23fff'/%3E%3C/svg%3E")}

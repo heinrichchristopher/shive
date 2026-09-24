@@ -87,6 +87,15 @@ case "$CMD" in
     ;;
   destroy)
     [ $YES = 1 ] || die "destroy requires --yes (explicit confirmation)"
+    # On a BACKUP TARGET, the newest snapshot of a schedule is the base the next incremental send
+    # continues from (the source's bookmark points at it). Deleting it forces a replication reset
+    # with a full re-send - refuse, and say why. On the source it is harmless (the bookmark covers it).
+    LOCS=$($SHIVE_CLI locations "$DS" "$SNAP" 2>/dev/null)
+    if [ -n "$LOCS" ] && [ "$LOCS" != "[]" ] && [ "$(jq -r '.[0].dataset' <<<"$LOCS")" != "$DS" ]; then
+      prefix="${SNAP%%-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-*}-"
+      newest=$(t_exec zfs list -H -o name -s creation -t snapshot -d 1 "$DS" 2>/dev/null | sed 's/.*@//' | grep "^$prefix" | tail -1)
+      [ "$newest" = "$SNAP" ] && die "$DS@$SNAP is the newest snapshot of its schedule on this backup target - the next backup continues from it. Deleting it would break incremental replication and force a full re-send. Delete an older snapshot instead; retention removes this one on its own once a newer one has arrived."
+    fi
     # a snapshot with clones cannot be destroyed - report that clearly instead of a raw zfs error
     for d in $(targets); do
       t_exec zfs list -H -o name "$d@$SNAP" >/dev/null 2>&1 || continue

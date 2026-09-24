@@ -17,6 +17,12 @@ NOTIFY="/usr/local/emhttp/webGui/scripts/notify"
 
 DRY_RUN=${DRY_RUN:-0}
 
+# NOTE for every script: never `... | grep -q` to decide something. Under `set -o pipefail`,
+# grep -q exits at the first match and closes the pipe; if the writer is still writing it gets
+# SIGPIPE (status 141) and the whole pipeline reports FAILURE although grep matched. Timing-
+# dependent, so it shows up rarely - and one caller (the orphan sweep) deletes on a false "no".
+# Use `grep ... >/dev/null` instead: without -q grep reads all input, so the writer never breaks.
+
 # ---- global config ---------------------------------------------------------
 # shellcheck disable=SC2034  # every variable set here is read by the scripts that source this
 load_cfg() {
@@ -64,7 +70,7 @@ state_init() {
     '{schedule:$s,pid:($pid|tonumber),started:$t,phase:"INIT",quiesced:false,resumed:true,
       containers:[],snapshot:"",sends:{},errors:[],warnings:[]}' > "$STATE_FILE"
 }
-state_set() { local f="$1"; shift; local tmp; tmp=$(mktemp); jq "$f" "$@" "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"; }
+state_set() { local f="$1"; shift; local tmp; tmp=$(mktemp); jq "$f" "$@" "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE" || { rm -f "$tmp"; return 1; }; }
 state_get() { jq -r "$1" "$STATE_FILE"; }
 phase() { state_set '.phase=$p' --arg p "$1"; log "phase: $1"; }
 add_error()   { state_set '.errors += [$e]'   --arg e "$1"; log "ERROR: $1"; }
@@ -78,7 +84,7 @@ tag_now() { date '+%d%m%Y-%H%M'; }                 # snapshot tag suffix: DDMMYY
 # parent has already lost (non-recursive manual delete), and `zfs snapshot -r` fails on that.
 snap_name() {
   local n clash=0; n="$1$(tag_now)"
-  if [ "${3:-0}" = 1 ]; then zfs list -H -r -t snapshot -o name "$2" 2>/dev/null | grep -q "@$n\$" && clash=1
+  if [ "${3:-0}" = 1 ]; then zfs list -H -r -t snapshot -o name "$2" 2>/dev/null | grep "@$n\$" >/dev/null && clash=1
   else zfs list -H -o name "$2@$n" >/dev/null 2>&1 && clash=1; fi
   [ $clash = 1 ] && n="$n-$(date +%S)"
   echo "$n"
@@ -137,6 +143,18 @@ t_pool_health() {
   else t_exec zpool list -H -o health "$(pool_of "$T_DS")" 2>/dev/null || echo "MISSING"; fi
 }
 t_reachable() { [ "$T_TYPE" = local ] && return 0; $(t_ssh_cmd) true >/dev/null 2>&1; }
+
+# active_runs -> state keys (one per line) of runs whose process is alive and not finished.
+# Keys: <schedule-id>[.send-local|.send-remote] for backup runs, restore-<dataset> for restores.
+active_runs() {
+  local f pid ph
+  for f in "$SHIVE_VAR"/state/*.json; do
+    [ -f "$f" ] || continue
+    case "$f" in *.done.json|*.recovered.json) continue;; esac
+    pid=$(jq -r '.pid // empty' "$f" 2>/dev/null); ph=$(jq -r '.phase // empty' "$f" 2>/dev/null)
+    [ -n "$pid" ] && [ "$ph" != DONE ] && [ "$pid" != "$$" ] && kill -0 "$pid" 2>/dev/null && basename "$f" .json
+  done
+}
 
 # ---- locking ---------------------------------------------------------------
 lock_or_exit() { exec 9>"$SHIVE_VAR/locks/$1.lock"; flock -n 9 || { log "another job holds lock '$1' - skipping"; exit 75; }; }

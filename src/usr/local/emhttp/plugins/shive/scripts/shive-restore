@@ -78,8 +78,10 @@ cmd_file() {
   if [ "$remote" = true ]; then
     run_cmd rsync "${rsargs[@]}" -e "$(t_ssh_cmd | sed 's/ [^ ]*@[^ ]*$//')" "${T_USER}@${T_HOST}:$src" "$dest"
   else
-    if [ -d "$src" ]; then mkdir -p "$dest"; run_cmd rsync "${rsargs[@]}" "$src/" "$dest/"
-    else mkdir -p "$(dirname "$dest")"; run_cmd rsync "${rsargs[@]}" "$src" "$dest"; fi
+    # mkdir only for real: a dry-run must leave no trace (it used to create an empty
+    # <dest>.shive-restore-* directory in copy mode)
+    if [ -d "$src" ]; then [ "$DRY_RUN" = 1 ] || mkdir -p "$dest"; run_cmd rsync "${rsargs[@]}" "$src/" "$dest/"
+    else [ "$DRY_RUN" = 1 ] || mkdir -p "$(dirname "$dest")"; run_cmd rsync "${rsargs[@]}" "$src" "$dest"; fi
   fi
   local rc=$?
   [ -n "$(jq -r '.staged_id // empty' <<<"$st")" ] && { ID=$(jq -r .staged_id <<<"$st"); cmd_unstage; }
@@ -94,6 +96,10 @@ cmd_dataset() {
   [ $YES = 1 ] || die "dataset restore requires --yes (explicit confirmation)"
   local ds="${SNAPSPEC%@*}" snap="${SNAPSPEC#*@}"
   dataset_exists "$ds" || die "dataset $ds missing"
+  # A backup run in progress would resume its own stopped containers in the middle of this
+  # restore - the application would then write into half-restored data.
+  local busy; busy=$(active_runs | grep -v '^restore-' | head -1)
+  [ -n "$busy" ] && die "a backup run is in progress ($busy) - wait for it to finish, then restore"
   mapfile -t tree < <(zfs list -H -r -o name "$ds")
   # container guard: same discovery as schedules, keyed by dataset
   source "$(dirname "$0")/lib/guard-docker.sh"
@@ -101,10 +107,18 @@ cmd_dataset() {
   state_set '.containers=$c' --argjson c "$($SHIVE_CLI linked-dataset "$ds")"
   trap 'guard_resume; exit' EXIT INT TERM
   guard_quiesce || die "could not stop linked containers - restore aborted"
-  # safety snapshot before anything destructive (own mini-retention)
-  local pre; pre=$(snap_name "shive-prerestore-" "$ds")
-  run_cmd zfs snapshot -r "$ds@$pre" || die "pre-restore snapshot failed"
-  local old; for old in $(snap_names "$ds" | grep '^shive-prerestore-' | head -n -"${PRERESTORE_KEEP:-3}"); do run_cmd zfs destroy -r "$ds@$old"; done
+  # Safety snapshot before anything destructive (own mini-retention) - copy-back only.
+  # `zfs rollback -r` destroys EVERY snapshot and bookmark newer than its target, so a pre-restore
+  # snapshot taken right before it would be destroyed by the very rollback it is meant to undo.
+  # Rollback therefore has no undo point, and says so instead of claiming one.
+  local pre=""
+  if [ "$METHOD" != rollback ]; then
+    pre=$(snap_name "shive-prerestore-" "$ds")
+    run_cmd zfs snapshot -r "$ds@$pre" || die "pre-restore snapshot failed"
+    local old; for old in $(snap_names "$ds" | grep '^shive-prerestore-' | head -n -"${PRERESTORE_KEEP:-3}"); do run_cmd zfs destroy -r "$ds@$old"; done
+  else
+    log "rollback: no pre-restore snapshot (zfs rollback -r would destroy it); newer snapshots and bookmarks of $ds will be destroyed"
+  fi
   local rc=0 d
   for d in "${tree[@]}"; do
     if ! zfs list -H -o name "$d@$snap" >/dev/null 2>&1; then log "no snapshot $snap on $d - skipped"; continue; fi
@@ -123,7 +137,9 @@ cmd_dataset() {
   trap - EXIT INT TERM
   guard_resume || rc=2
   mv "$STATE_FILE" "$STATE_FILE.done" 2>/dev/null
-  [ $rc = 0 ] && notify normal "Shive: dataset restore done" "$ds restored to $snap ($METHOD); pre-restore snapshot $pre kept" \
+  local undo="pre-restore snapshot $pre kept"
+  [ "$METHOD" = rollback ] && undo="no undo point (rollback destroys newer snapshots and bookmarks); replication of $ds may need a reset"
+  [ $rc = 0 ] && notify normal "Shive: dataset restore done" "$ds restored to $snap ($METHOD); $undo" \
               || notify alert "Shive: dataset restore FAILED" "$ds <- $snap ($METHOD), rc=$rc"
   return $rc
 }
@@ -136,8 +152,10 @@ cmd_dr() {
   t_parse "$TARGET"
   local rf=""; [ $REC = 1 ] && rf="-R"
   log "DR receive $SNAPSPEC from [$T_TYPE] -> $TO"
-  if [ "$DRY_RUN" = 1 ]; then log "DRY-RUN: t_exec zfs send $rf $SNAPSPEC | zfs receive -u -x mountpoint $TO"; return 0; fi
-  t_exec zfs send $rf "$SNAPSPEC" | zfs receive -u -x mountpoint "$TO" || { notify alert "Shive: DR restore FAILED" "$SNAPSPEC -> $TO"; return 1; }
+  # Backup targets are received with readonly=on; a -R stream carries that property back, and the
+  # restored dataset would be read-only once swapped into place. -x readonly drops it (-> inherited).
+  if [ "$DRY_RUN" = 1 ]; then log "DRY-RUN: zfs send $rf $SNAPSPEC | zfs receive -u -x mountpoint -x readonly $TO"; return 0; fi
+  t_exec zfs send $rf "$SNAPSPEC" | zfs receive -u -x mountpoint -x readonly "$TO" || { notify alert "Shive: DR restore FAILED" "$SNAPSPEC -> $TO"; return 1; }
   notify normal "Shive: DR restore done" "$SNAPSPEC received as $TO. Swap in via: zfs rename <live> <live>-old && zfs rename $TO <live>"
 }
 

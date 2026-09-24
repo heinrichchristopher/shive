@@ -2,13 +2,13 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "shive">
 <!ENTITY author    "heinrichchristopher">
-<!ENTITY version   "2026.09.21">
+<!ENTITY version   "2026.09.24">
 <!ENTITY launch    "Settings/Shive">
 <!ENTITY gitURL    "https://raw.githubusercontent.com/heinrichchristopher/shive/main">
 <!ENTITY pluginURL "&gitURL;/shive.plg">
 <!ENTITY pkgURL    "https://github.com/heinrichchristopher/shive/releases/download/&version;">
 <!ENTITY pkgName   "shive-&version;-noarch-1.txz">
-<!ENTITY pkgMD5    "8a844a6cef65403ce48f5d06f3d6caa5">
+<!ENTITY pkgMD5    "99811fad030a44af29c2d29a00068be9">
 <!ENTITY plgPath   "/boot/config/plugins/&name;">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
 ]>
@@ -18,6 +18,20 @@
         support="https://github.com/heinrichchristopher/shive/issues">
 
 <CHANGES>
+###2026.09.24
+- Excluding a child dataset from the snapshot now also excludes its container from stop/resume
+  (also in the editor's "Show linked containers" preview). Exclusion checklists show a red minus.
+- Fix: a check pattern (grep -q in a pipeline) could report "not found" on a match. Worst case the
+  orphan sweep deleted a valid child snapshot. All occurrences fixed.
+- Fix: a container that started on the second attempt still raised "containers still DOWN".
+- Fix: rollback restore claimed a safety snapshot that the rollback itself destroyed.
+- Fix: disaster-recovery restores came back read-only.
+- Backup runs and dataset restores no longer run at the same time.
+- Delete refuses the newest snapshot on a backup target (the base of the next backup).
+- Two schedules writing into the same target dataset are rejected at save time.
+- Settings are validated server-side; log access and cleanup only touch Shive's own folders.
+- Clearer recovery messages (which host, zfs receive -A for a stuck transfer); dry-run shows
+  everything a real run would delete and creates nothing.
 ###2026.09.21
 - Replication base lost on the target (a snapshot deleted or created there by hand): detected by
   GUID before sending, explained in plain terms with the concrete recovery step, and shown in the

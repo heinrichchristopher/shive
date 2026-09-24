@@ -40,7 +40,8 @@ done
 # day per location, which on a server that stays up for months is a slow, pointless climb.
 # Keep the recent ones (that's what the History tab shows anyway) and drop the rest.
 LOG_KEEP="${LOG_KEEP_PER_SCHEDULE:-200}"
-for d in "$LOG_DIR"/*/; do
+# only <LOG_DIR>/<6-hex schedule id>/ - LOG_DIR is configurable, and anything else in it is not ours
+for d in "$LOG_DIR"/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/; do
   [ -d "$d" ] || continue
   ls -1t "$d"*.log 2>/dev/null | tail -n +$((LOG_KEEP + 1)) | while read -r old; do rm -f "$old"; done
 done

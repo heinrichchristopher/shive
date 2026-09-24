@@ -646,3 +646,90 @@ clock. Suite: 143.
 One unexplained single failure of the "foreign newer snapshot" check on the first suite run after
 adding it; not reproduced in the next three runs, and the case has no timing dependence. Noted
 rather than guessed at.
+
+## Excluding a dataset did not exclude its container from stop/resume (2026-09-24, reported live)
+
+Question from the field: excluding a child dataset from the snapshot (e.g. to temporarily leave a
+container out of the backup) - does the container still get stopped and restarted? It did, and
+pointlessly: `docker_linked()` matched a container's bind-mount path against the schedule's
+`datasets`/`recursive` alone, with no awareness of `exclude_datasets`. A container whose entire
+matching dataset was excluded from the snapshot was still identified as linked and still quiesced
+around a snapshot that no longer contained any of its data - downtime with no backup benefit.
+
+Fixed: `docker_linked()` takes an `$exclude` list and skips a bind-mount whose dataset is excluded
+(or sits below an excluded one, matching the same rule `is_excluded()` uses elsewhere) before
+matching it against the schedule's datasets. A container with another, non-excluded mount is still
+linked for that mount's sake - only the specific excluded relationship stops counting.
+
+Threaded through every caller: the real run (`cli.php linked`, called by `guard_prepare()` - the
+actual code path `shive-run` uses to decide who to stop), the saved-schedule API path, and the
+editor's live "Show linked containers" preview (which now sends whatever exclusions are currently
+ticked, even before the schedule is saved, so the preview cannot disagree with what a real run
+would do).
+
+**Sandbox note, not a code issue:** this session started from a fresh container after the previous
+one reset. The repo tarball's exec bits did not survive re-packaging/download - every script under
+`scripts/`, `event/`, and every fake binary in `test/` had lost +x, which cascaded into 57 unrelated
+-looking test failures (starting from the very first real `shive-run` invocation) until traced back
+to `test/zpool` specifically reporting every pool "MISSING". Restored with `chmod +x` throughout;
+worth remembering for any future fresh-sandbox start. Suite: 147.
+
+## Exclusion checkboxes looked like normal selection (2026-09-24)
+
+A checked checkbox reading as "excluded" is backwards from how a checkbox normally reads
+("checked = included/selected"), and the three exclusion lists used plain native checkboxes -
+same blue checkmark as the dataset picker above them that means the opposite thing. Given a
+distinct class (`shive-excl`) and restyled: `appearance:none`, plain bordered box at rest, red
+fill with a white minus (not a checkmark) when checked. Only the three exclusion lists
+(`f-exclude`, `f-local-exclude`, `f-remote-exclude`) go through the render() helper that assigns
+this class; the dataset-inclusion picker uses its own `f-ds` class and is untouched.
+
+## Full-code QC pass (2026-09-24)
+
+Every script and PHP file read end to end, not only recent changes. Findings, all fixed with
+regression checks (suite 147 -> 173):
+
+**grep -q inside pipelines under pipefail (the important one).** `grep -q` exits at the first
+match and closes the pipe; a writer still writing gets SIGPIPE (141) and `pipefail` reports the
+whole pipeline as failed although grep matched. Timing-dependent - this was the "unexplained"
+intermittent failure of the target-base test seen in two sessions; captured evidence showed the
+bookmark GUID present on the target while `bm_check` reported it gone. Six sites. Worst: the orphan
+sweep in shive-prune, where a false "no parent twin" deletes a valid child snapshot (in practice
+only with very long snapshot lists, but correctness must not depend on pipe-buffer sizes).
+Deterministic proof with a >64 KB list: old pattern 0/20, `grep -x ... >/dev/null` 20/20. A static
+rule in test/run.sh rejects the pattern from now on; the reason is documented in common.sh.
+
+**guard_resume** kept a failed attempt's `resume_failed` and error after a later retry (from
+finalize) succeeded -> "containers still DOWN" for running containers. Cleared on success, recorded
+as a warning. `RESUME_RETRY_DELAY` (default 5) makes the retry backoff tunable for tests.
+
+**Restore.** Rollback: `zfs rollback -r` destroys every newer snapshot and bookmark, including the
+pre-restore snapshot taken just before it - which the notification and the GUI confirm dialog both
+promised as an undo point. Rollback now takes none and says plainly there is no undo. DR: backup
+targets carry readonly=on and a -R stream brings it back, so the restored dataset was read-only;
+received with `-x readonly`. File-restore dry-run no longer creates the destination directory.
+Backup runs and dataset restores exclude each other via `active_runs()` (a run would otherwise
+resume its containers in the middle of a restore).
+
+**Delete button** could remove the newest snapshot on a backup target - the base of the next
+incremental. Refused with an explanation (the source side is fine, the bookmark covers it). The
+"base lost" message no longer claims only other tools can cause this.
+
+**Cross-schedule collisions.** Basename uniqueness was checked within one schedule only; two
+schedules sharing a root with `pin/appdata` and `kilderkin/appdata` both wrote `<root>/appdata`.
+Rejected at save time, naming the other schedule.
+
+**Settings** are sourced by bash: values were double-quoted with only `"` removed, so `$(...)` and
+backticks still expanded, and numeric fields were only limited by browser min/max. Strict per-key
+validation server-side, values written single-quoted. Not a privilege boundary (only root-equivalent
+admins can save settings), but a correctness one.
+
+**LOG_DIR scope.** Housekeeping deleted old `.log` files in every subfolder of the configurable
+LOG_DIR, and the log API listed/read them - pointing LOG_DIR at /var/log would have reached system
+logs. Both now only touch `<LOG_DIR>/<6-hex id>/`.
+
+**Smaller:** browse path filter allowed `..` after the snapshot prefix; recovery hints leaked the
+internal `t_exec` name and did not say which host to run commands on; a resume token that can never
+complete failed every run without mentioning `zfs receive -A`; the old bookmark was dropped even
+when there was no new snapshot to bookmark; dry-run skipped the orphan sweep silently;
+`state_set` leaked a temp file when jq failed.

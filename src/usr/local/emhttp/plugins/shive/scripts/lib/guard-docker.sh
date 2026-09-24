@@ -54,17 +54,23 @@ guard_resume() {
   for c in $(state_get '[.containers[]|select(.running)|.name]|.[]'); do
     if [ "$DRY_RUN" = 1 ]; then log "DRY-RUN: docker start $c"; continue; fi
     local i
-    for i in 1 2 3; do docker start "$c" >/dev/null 2>&1 && break; sleep $((i*5)); done
-    if docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null | grep -q true; then
+    for i in 1 2 3; do docker start "$c" >/dev/null 2>&1 && break; sleep $((i*${RESUME_RETRY_DELAY:-5})); done
+    if docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null | grep true >/dev/null; then
       log "resumed container $c"
     else
       failed+=("$c"); fail=1
     fi
   done
   if [ $fail = 0 ]; then
-    state_set '.resumed=true'
+    # A previous attempt in this same run may have failed (RESUME phase) before this retry from
+    # finalize succeeded. Its resume_failed list and error must not survive: finalize would
+    # otherwise alert "containers still DOWN - start them manually" for containers that are up.
+    local earlier; earlier=$(state_get '(.resume_failed // [])|join(", ")')
+    state_set '.resumed=true | .resume_failed=[] | .errors |= map(select(startswith("container resume FAILED")|not))'
+    [ -n "$earlier" ] && add_warning "container(s) $earlier needed more than one attempt to restart - now running"
   else
     state_set '.resume_failed=$f' --argjson f "$(printf '%s\n' "${failed[@]}" | jq -R . | jq -s .)"
+    state_set '.errors |= map(select(startswith("container resume FAILED")|not))'   # one entry, the latest
     add_error "container resume FAILED: ${failed[*]}"
   fi
   return $fail

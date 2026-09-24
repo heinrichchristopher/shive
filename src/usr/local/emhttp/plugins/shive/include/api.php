@@ -35,7 +35,10 @@ switch ($op) {
   /* ---- status / config ---- */
   case 'status':   reply(shive_status_rebuild());
   case 'config':   reply(['ok' => true, 'config' => shive_cfg()]);
-  case 'config_save': if (!$post) fail('POST'); shive_cfg_save($json('config') ?: []); reply(['ok' => true, 'config' => shive_cfg()]);
+  case 'config_save':
+    if (!$post) fail('POST');
+    $err = shive_cfg_save($json('config') ?: []);
+    $err ? reply(['ok' => false, 'error' => implode('; ', $err), 'errors' => $err], 400) : reply(['ok' => true, 'config' => shive_cfg()]);
 
   /* ---- inventory ---- */
   case 'datasets': reply(['ok' => true, 'pools' => array_values(zfs_pools()), 'datasets' => array_values(zfs_datasets())]);
@@ -60,10 +63,11 @@ switch ($op) {
     if (isset($in['datasets'])) {
       $ds = array_values(array_filter((array)$json('datasets')));
       if (!$ds) fail('datasets required');
-      reply(['ok' => true, 'containers' => docker_linked($ds, !empty($in['recursive']), true)]);
+      $exd = array_values(array_filter((array)$json('exclude_datasets')));
+      reply(['ok' => true, 'containers' => docker_linked($ds, !empty($in['recursive']), true, $exd)]);
     }
     $s = shive_schedule_load($in['id'] ?? '') ?: fail('not found', 404);
-    reply(['ok' => true, 'containers' => docker_linked($s['datasets'], $s['recursive'], true)]);
+    reply(['ok' => true, 'containers' => docker_linked($s['datasets'], $s['recursive'], true, $s['exclude_datasets'])]);
   case 'run':
     if (!$post) fail('POST');
     $s = shive_schedule_load($in['id'] ?? '') ?: fail('not found', 404);
@@ -137,7 +141,8 @@ switch ($op) {
     script('shive-restore', ['unstage', '--id', $in['id'] ?? '']); reply(['ok' => true]);
   case 'browse':
     $p = $in['path'] ?? ''; $t = $in['target'] ?? 'local';
-    if (!preg_match('#^(/mnt/[^/]+(?:/[^/]+)*/\.zfs/snapshot/[^/]+|/mnt/shive/restore/[^/]+|/tmp/shive-restore/[^/]+)(/.*)?$#', $p)) fail('path outside snapshot staging area');
+    if (!preg_match('#^(/mnt/[^/]+(?:/[^/]+)*/\.zfs/snapshot/[^/]+|/mnt/shive/restore/[^/]+|/tmp/shive-restore/[^/]+)(/.*)?$#', $p)
+        || preg_match('#(^|/)\.\.?(/|$)#', $p)) fail('path outside snapshot staging area');   // no ./.. segments
     $entries = zfs_browse($p, $t);
     // Inside <mountpoint>/.zfs/snapshot/<snap>/<rel>, a child dataset shows up as an EMPTY directory
     // (its data lives in its own snapshot). Flag those so the GUI points at the child's snapshot.
@@ -175,7 +180,7 @@ switch ($op) {
   case 'logs':
     $dir = rtrim(shive_cfg()['LOG_DIR'], '/'); $list = [];
     $names = []; foreach (shive_schedules() as $s) $names[$s['id']] = $s['name'];
-    foreach (glob("$dir/*/*.log") ?: [] as $f) {
+    foreach (glob("$dir/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/*.log") ?: [] as $f) {
       $key = basename(dirname($f));
       $list[] = ['schedule' => $key, 'label' => $names[$key] ?? "$key (deleted)", 'file' => basename($f), 'size' => filesize($f), 'mtime' => filemtime($f)];
     }
@@ -185,6 +190,7 @@ switch ($op) {
   case 'log':
     $dir = rtrim(shive_cfg()['LOG_DIR'], '/');
     $f = basename($in['file'] ?? ''); $s = basename($in['schedule'] ?? '');
+    if ($s !== 'restore' && (!shive_valid_id($s) || !str_ends_with($f, '.log'))) fail('not found', 404);
     $path = $s === 'restore' ? "$dir/restore.log" : "$dir/$s/$f";
     if (!is_file($path)) fail('not found', 404);
     reply(['ok' => true, 'content' => shive_run('tail -n 2000 ' . escapeshellarg($path))]);

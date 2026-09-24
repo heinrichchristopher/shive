@@ -22,11 +22,32 @@ function shive_cfg(): array {
   $c = @parse_ini_file(SHIVE_PLG . '/shive.cfg') ?: [];
   return array_merge(SHIVE_CFG_DEFAULTS, $c);
 }
-function shive_cfg_save(array $c): void {
-  $c = array_intersect_key(array_merge(shive_cfg(), $c), SHIVE_CFG_DEFAULTS);
+/* shive.cfg is `source`d by every shell script, so a value is effectively code: inside double
+   quotes bash still expands $(...) and backticks, and a trailing backslash breaks the file for
+   every job. Each key therefore gets a strict shape check here (the GUI's min/max attributes are
+   only a browser hint), and values are written single-quoted, where bash expands nothing. */
+function shive_cfg_validate(array $c): array {
+  $e = [];
+  $path  = fn($v) => $v === '' || (bool)preg_match('#^/[A-Za-z0-9._/-]*$#', $v);
+  $int   = fn($v, $lo, $hi) => ctype_digit((string)$v) && (int)$v >= $lo && (int)$v <= $hi;
+  if (!preg_match('#^/[A-Za-z0-9._/-]+$#', $c['LOG_DIR']) || rtrim($c['LOG_DIR'], '/') === '' || str_contains($c['LOG_DIR'], '..'))
+    $e[] = 'Log directory: absolute path, letters/digits/._-/ only, not /';
+  foreach (['NOTIFY_ON_SUCCESS', 'CATCHUP_ON_START'] as $k) if (!in_array($c[$k], ['yes', 'no'], true)) $e[] = "$k must be yes or no";
+  if (!$int($c['DOCKER_STOP_TIMEOUT'], 5, 600)) $e[] = 'Docker stop timeout: whole seconds, 5-600';
+  if (!$int($c['RESTORE_CLONE_TTL'], 300, 604800)) $e[] = 'Restore clone TTL: whole seconds, 300-604800';
+  if (!$int($c['PRERESTORE_KEEP'], 1, 20)) $e[] = 'Pre-restore snapshots to keep: 1-20';
+  if (!$path($c['SSH_KEY'])) $e[] = 'SSH private key: empty, or an absolute path (letters/digits/._-/)';
+  if (!preg_match('#^[A-Za-z0-9 =_.,:/@+-]*$#', $c['SSH_OPTS'])) $e[] = 'SSH options: letters, digits, spaces and =_.,:/@+- only';
+  return $e;
+}
+function shive_cfg_save(array $c): array {
+  $c = array_map('strval', array_intersect_key(array_merge(shive_cfg(), $c), SHIVE_CFG_DEFAULTS));
+  $c['LOG_DIR'] = rtrim($c['LOG_DIR'], '/');
+  if ($err = shive_cfg_validate($c)) return $err;
   $out = '';
-  foreach ($c as $k => $v) $out .= $k . '="' . str_replace('"', '', (string)$v) . '"' . "\n";
+  foreach ($c as $k => $v) $out .= $k . "='" . $v . "'\n";      // validated: contains no quote
   shive_atomic_write(SHIVE_PLG . '/shive.cfg', $out);
+  return [];
 }
 function shive_atomic_write(string $file, string $data): void {
   @mkdir(dirname($file), 0755, true);
@@ -209,6 +230,23 @@ function shive_schedule_validate(array $s): array {
   if (count($s['datasets']) > 1) {
     $b = array_map(fn($d) => basename($d), $s['datasets']);
     if (count($b) !== count(array_unique($b))) $e[] = 'the last path component of each source dataset must be unique - every source is stored as <target-root>/<basename>, so identical basenames would collide in the target';
+  }
+  // Several schedules may share a backup root - but not a destination. Two schedules backing up
+  // e.g. pin/appdata and kilderkin/appdata into the same root would both write <root>/appdata;
+  // the second one then fails on every run with a message that doesn't name the real cause.
+  $dest = function (array $x, string $loc): array {
+    $t = $x[$loc] ?? [];
+    if (empty($t['enabled']) || ($t['dataset'] ?? '') === '') return [];
+    $where = $loc === 'remote_target' ? strtolower($t['host'] ?? '') . ':' : 'local:';
+    return array_map(fn($d) => $where . shive_target_for($t['dataset'], $d), $x['datasets'] ?? []);
+  };
+  foreach (shive_schedules() as $other) {
+    if (($other['id'] ?? '') === ($s['id'] ?? '')) continue;
+    foreach (['local_target' => 'local', 'remote_target' => 'remote'] as $loc => $label) {
+      $clash = array_intersect($dest($s, $loc), $dest($other, $loc));
+      if ($clash) $e[] = "$label backup target collides with schedule '{$other['name']}' [{$other['id']}]: both would write into "
+        . preg_replace('/^[^:]*:/', '', reset($clash)) . ' - use a different backup root for one of them';
+    }
   }
   if ($s['frequency'] === 'custom' && !preg_match('/^(\S+\s+){4}\S+$/', trim($s['cron'] ?? ''))) $e[] = 'custom cron needs 5 fields';
   foreach (['local_target' => 'local', 'remote_target' => 'remote'] as $k => $label)

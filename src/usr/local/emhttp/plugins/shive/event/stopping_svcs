@@ -1,5 +1,5 @@
 #!/bin/bash
 # services stopping (docker still up): stop running jobs gracefully; their trap resumes containers
 pkill -TERM -f "/usr/local/emhttp/plugins/shive/scripts/shive-run" 2>/dev/null || exit 0
-for i in $(seq 1 60); do pgrep -f "shive/scripts/shive-run" >/dev/null || break; sleep 1; done
+for _ in $(seq 1 60); do pgrep -f "shive/scripts/shive-run" >/dev/null || break; sleep 1; done
 pkill -KILL -f "/usr/local/emhttp/plugins/shive/scripts/shive-run" 2>/dev/null || true

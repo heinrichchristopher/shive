@@ -22,4 +22,10 @@ elif a[0]=='stop':
     if delay: __import__('time').sleep(delay)   # for its full -t timeout before returning, like the real thing
     s[n]['running']=False; json.dump(s,open(ST,'w'))
 elif a[0]=='start':
-    n=a[-1]; s[n]['running']=True; json.dump(s,open(ST,'w'))
+    n=a[-1]
+    # start_fail: refuse this many start attempts first (a container whose dependency isn't
+    # ready yet), then succeed - lets tests exercise a resume that only works on a later retry
+    if s[n].get('start_fail', 0) > 0:
+        s[n]['start_fail'] -= 1; json.dump(s,open(ST,'w'))
+        print(f"Error response from daemon: failed to start {n}", file=sys.stderr); sys.exit(1)
+    s[n]['running']=True; json.dump(s,open(ST,'w'))
