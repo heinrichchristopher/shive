@@ -733,3 +733,26 @@ internal `t_exec` name and did not say which host to run commands on; a resume t
 complete failed every run without mentioning `zfs receive -A`; the old bookmark was dropped even
 when there was no new snapshot to bookmark; dry-run skipped the orphan sweep silently;
 `state_set` leaked a temp file when jq failed.
+
+## build.sh only worked on Linux (2026-09-24, found when actually releasing from a Mac)
+
+The reproducibility fix from an earlier round used GNU tar's `--sort=name --mtime --owner --group
+--numeric-owner`. That is GNU-tar-only syntax - macOS ships bsdtar (libarchive) as `/usr/bin/tar`,
+which doesn't recognize `--sort` at all and fails immediately. Since the release flow requires
+build.sh to run locally (on whatever machine tags a release) before the GitHub Actions runner
+rebuilds and verifies against the committed shive.plg, this made a release impossible from a Mac -
+found only when actually trying to release from one, because it had only ever been run in the
+Linux sandbox before.
+
+Worse than a portability bug: even patched to bsdtar's own flag names, there's no guarantee two
+*different* tar implementations encode "the same" archive to identical bytes - which is exactly
+what the committed MD5 depends on. Fixed by removing the platform tar binary from the reproducible
+path entirely: an embedded Python script builds the .txz via the standard library's `tarfile`
+module (mode `w:xz`), walking the tree in sorted order and zeroing mtime/uid/gid/uname/gname on
+each entry. Since the exact same interpreter code runs regardless of OS, Linux and macOS now
+produce byte-identical output - verified reproducible (two builds, identical MD5) and faithful
+(extracted output diffs identical to the source tree, content and permissions) in this session.
+
+Directory entries are no longer written (only files - tar auto-creates parent directories on
+extraction, and the package tree has no genuinely empty directories), so the entry count dropped
+from 51 to 37; purely cosmetic; verified against the extracted tree, not against the entry count.

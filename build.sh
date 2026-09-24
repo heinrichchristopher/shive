@@ -14,9 +14,27 @@ shive: quiesce/resume, local + SSH replication, snapshot browser/restore.
 D
 chmod 0755 build/pkg/usr/local/emhttp/plugins/shive/scripts/shive-* build/pkg/usr/local/emhttp/plugins/shive/event/*
 # Reproducible: identical sources must produce an identical package, because the MD5 that ends up
-# in the committed shive.plg has to match the package the release attaches. Without pinning sort
-# order, mtimes and ownership, two builds of the same tree differ and the checksum is meaningless.
-( cd build/pkg && tar --sort=name --mtime="@0" --owner=0 --group=0 --numeric-owner -cJf "../$PKG" . )
+# in the committed shive.plg has to match the package the release attaches (built independently
+# by the GitHub Actions runner). GNU tar's --sort/--mtime/--owner flags achieve this on Linux, but
+# this script also has to run on whatever machine tags a release - e.g. a Mac, where /usr/bin/tar
+# is bsdtar (libarchive) and doesn't understand those flags at all, and even if it did, two
+# different tar implementations aren't guaranteed to encode "the same" archive identically byte
+# for byte. Python's tarfile module sidesteps both problems: it never shells out to the platform's
+# tar binary, so the exact same interpreter code produces the exact same bytes on Linux and macOS.
+python3 - "$PKG" <<'PYEOF'
+import tarfile, os, sys
+pkg = sys.argv[1]
+with tarfile.open(f"build/{pkg}", "w:xz") as tf:
+    for root, dirs, files in os.walk("build/pkg"):
+        dirs.sort()
+        for name in sorted(files):
+            path = os.path.join(root, name)
+            arcname = "." + path[len("build/pkg"):]
+            info = tf.gettarinfo(path, arcname=arcname)
+            info.mtime = 0; info.uid = 0; info.gid = 0; info.uname = ""; info.gname = ""
+            with open(path, "rb") as f:
+                tf.addfile(info, f)
+PYEOF
 MD5=$(md5sum "build/$PKG" | cut -d' ' -f1)
 sed -i -e "s/<!ENTITY version   \"[^\"]*\">/<!ENTITY version   \"$VER\">/" \
        -e "s/<!ENTITY pkgMD5    \"[^\"]*\">/<!ENTITY pkgMD5    \"$MD5\">/" shive.plg

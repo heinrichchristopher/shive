@@ -8,7 +8,7 @@
 <!ENTITY pluginURL "&gitURL;/shive.plg">
 <!ENTITY pkgURL    "https://github.com/heinrichchristopher/shive/releases/download/&version;">
 <!ENTITY pkgName   "shive-&version;-noarch-1.txz">
-<!ENTITY pkgMD5    "99811fad030a44af29c2d29a00068be9">
+<!ENTITY pkgMD5    "9dab084764ba4fef0511e3cbc309c494">
 <!ENTITY plgPath   "/boot/config/plugins/&name;">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
 ]>
@@ -18,6 +18,9 @@
         support="https://github.com/heinrichchristopher/shive/issues">
 
 <CHANGES>
+###2026.09.24 (build fix, no plugin functionality changed)
+- build.sh now packages via Python's tarfile module instead of GNU-tar-specific flags, so it
+  produces byte-identical packages on macOS and Linux alike (needed for releasing from a Mac).
 ###2026.09.24
 - Excluding a child dataset from the snapshot now also excludes its container from stop/resume
   (also in the editor's "Show linked containers" preview). Exclusion checklists show a red minus.
