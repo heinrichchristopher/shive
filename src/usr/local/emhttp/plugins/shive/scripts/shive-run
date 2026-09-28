@@ -1,0 +1,329 @@
+#!/bin/bash
+# shive-run – execute one schedule end-to-end.
+#   shive-run <id|name> [--dry-run] [--force] [--send-only local|remote] [--no-send]
+#                        [--no-send-local] [--no-send-remote] [--no-prune]
+# <id|name>: the 6-hex schedule id (what cron uses) or its display name (both resolve
+# via cli.php schedule-get). State/lock/log files are always keyed by the id, so a
+# rename never orphans history.
+# Exit: 0 ok, 1 failed, 2 resume failed (alert), 75 skipped (lock/disabled)
+set -uo pipefail
+source "$(dirname "$0")/lib/common.sh"
+
+SCHED="${1:-}"; [ -n "$SCHED" ] || die "usage: shive-run <id|name> [--dry-run] [--force] [--send-only local|remote] [--no-send] [--no-send-local] [--no-send-remote] [--no-prune]"
+shift
+FORCE=0; NO_SEND=0; NO_PRUNE=0; SKIP_LOCAL=0; SKIP_REMOTE=0; SEND_ONLY=""
+while [ $# -gt 0 ]; do case "$1" in
+  --dry-run) DRY_RUN=1; shift;; --force) FORCE=1; shift;; --no-send) NO_SEND=1; shift;;
+  --no-send-local) SKIP_LOCAL=1; shift;; --no-send-remote) SKIP_REMOTE=1; shift;; --no-prune) NO_PRUNE=1; shift;;
+  --send-only) SEND_ONLY="$2"; shift 2;;
+  *) die "unknown option $1";; esac; done
+case "$SEND_ONLY" in ''|local|remote) ;; *) die "--send-only takes 'local' or 'remote'";; esac
+export DRY_RUN
+
+load_cfg
+SCHED_JSON=$(sched_json "$SCHED") || die "schedule '$SCHED' not found or invalid"
+SCHED_ID=$(sq "$SCHED_JSON" .id); SCHED_NAME=$(sq "$SCHED_JSON" .name)
+PREFIX=$(sq "$SCHED_JSON" .tag_prefix)      # derived once in PHP (shive_tag_prefix), never rebuilt here
+[[ "$SCHED_ID" =~ ^[0-9a-f]{6}$ ]] || die "schedule has an invalid id"
+[ "$(sq "$SCHED_JSON" .enabled)" = true ] || [ $FORCE = 1 ] || { log "schedule disabled - skipping"; exit 75; }
+if [ "$SEND_ONLY" = local ]  && [ "$(sq "$SCHED_JSON" .local_target.enabled)"  != true ]; then log "local target not enabled - nothing to do";  exit 75; fi
+if [ "$SEND_ONLY" = remote ] && [ "$(sq "$SCHED_JSON" .remote_target.enabled)" != true ]; then log "remote target not enabled - nothing to do"; exit 75; fi
+
+# state/lock/log are keyed by the immutable id, never by the (renamable) display name
+LOCKNAME="sched-$SCHED_ID"; STATEKEY="$SCHED_ID"
+[ -n "$SEND_ONLY" ] && { LOCKNAME="send-$SEND_ONLY-$SCHED_ID"; STATEKEY="$SCHED_ID.send-$SEND_ONLY"; }
+lock_or_exit "$LOCKNAME"
+"$SHIVE_EMHTTP/scripts/shive-recover" --quiet || true      # safety net for a previous crashed run
+
+mkdir -p "$LOG_DIR/$SCHED_ID"
+LOG_FILE="$LOG_DIR/$SCHED_ID/$(ts_now)${SEND_ONLY:+-send-$SEND_ONLY}.log"
+export LOG_FILE                                  # shive-send / shive-prune log into the same file
+state_init "$STATEKEY"
+state_set '.mode=$m' --arg m "${SEND_ONLY:-full}"
+state_set '.log=$l | .dry_run=($d=="1")' --arg l "$LOG_FILE" --arg d "$DRY_RUN"
+log "=== shive run '$SCHED_NAME' [$SCHED_ID] start (dry-run=$DRY_RUN) ==="
+
+# ---- guard selection --------------------------------------------------------
+if [ "$(sq "$SCHED_JSON" .docker_aware)" = true ]; then
+  source "$(dirname "$0")/lib/guard-docker.sh"; log "guard: docker"
+else
+  source "$(dirname "$0")/lib/guard-none.sh"; log "guard: none"
+fi
+
+mapfile -t DATASETS < <(sq "$SCHED_JSON" '.datasets[]')
+log "schedule '$SCHED_NAME' [$SCHED_ID], snapshot tag prefix $PREFIX"
+RECURSIVE=$(sq "$SCHED_JSON" .recursive)
+RFLAG=""; [ "$RECURSIVE" = true ] && RFLAG="-r"
+LOCAL_ON=$(sq "$SCHED_JSON" .local_target.enabled);  LOCAL_DS=$(sq "$SCHED_JSON" .local_target.dataset)
+REMOTE_ON=$(sq "$SCHED_JSON" .remote_target.enabled); REMOTE_SPEC=$(sq "$SCHED_JSON" .remote_target.spec)
+EXCL=$(sq "$SCHED_JSON" '.exclude_props|join(",")')
+mapfile -t EXCLUDE_SNAP   < <(sq "$SCHED_JSON" '.exclude_datasets[]?')
+mapfile -t EXCLUDE_LOCAL  < <(sq "$SCHED_JSON" '.local_target.exclude_effective[]?')
+mapfile -t EXCLUDE_REMOTE < <(sq "$SCHED_JSON" '.remote_target.exclude_effective[]?')
+[ ${#EXCLUDE_SNAP[@]}   -gt 0 ] && log "snapshot exclusions: ${EXCLUDE_SNAP[*]}"
+[ ${#EXCLUDE_LOCAL[@]}  -gt 0 ] && log "local send exclusions: ${EXCLUDE_LOCAL[*]}"
+[ ${#EXCLUDE_REMOTE[@]} -gt 0 ] && log "remote send exclusions: ${EXCLUDE_REMOTE[*]}"
+SEND_LOCAL=$LOCAL_ON; SEND_REMOTE=$REMOTE_ON
+[ $NO_SEND = 1 ] && { SEND_LOCAL=false; SEND_REMOTE=false; }
+[ $SKIP_LOCAL = 1 ] && SEND_LOCAL=false
+[ $SKIP_REMOTE = 1 ] && SEND_REMOTE=false
+# a location with its own send schedule is never sent from a snapshot run - cron passes
+# --no-send-<loc> for that, but a manual "Run" from the GUI must behave the same way
+if [ -z "$SEND_ONLY" ]; then
+  [ "$(sq "$SCHED_JSON" .local_target.own_schedule)"  = true ] && SEND_LOCAL=false
+  [ "$(sq "$SCHED_JSON" .remote_target.own_schedule)" = true ] && SEND_REMOTE=false
+fi
+if [ -n "$SEND_ONLY" ]; then                       # send-only run: no snapshot, no containers, one location
+  if [ "$SEND_ONLY" = local ]; then SEND_LOCAL=$LOCAL_ON; SEND_REMOTE=false
+  else SEND_REMOTE=$REMOTE_ON; SEND_LOCAL=false; fi
+fi
+
+# local_target.dataset / remote_target.dataset are a ROOT, never the literal destination:
+# every source dataset lands at <root>/<basename-of-source>, so one root can host several
+# schedules (or several source datasets in one schedule) side by side without collision, and
+# `zfs receive` never has to write into a pre-existing dataset (see PRECHECK below).
+target_for() { echo "$1/${2##*/}"; }   # <target-root> <source-ds>
+
+# ---- finalize: ALWAYS runs (trap EXIT) --------------------------------------
+finalize() {
+  local rc=$?
+  trap - EXIT INT TERM
+  phase FINALIZE
+  guard_resume || rc=2
+  local status="success"
+  [ "$(state_get '.warnings|length')" != 0 ] && status="warning"
+  [ "$(state_get '.errors|length')"   != 0 ] && status="failed"
+  [ "$(state_get '.resume_failed // [] | length')" != 0 ] && status="failed"
+  [ "$(state_get '.phase')" = FINALIZE ] && [ $rc -ne 0 ] && [ "$status" = success ] && status="failed"
+  state_set '.status=$s | .finished=$t | .phase="DONE"' --arg s "$status" --arg t "$(date -Is)"
+  # ---- notifications: exactly one per run. Read everything from the state file BEFORE it is
+  #      moved away below - reading after the mv silently yields empty strings, and an empty
+  #      string is != 0, which used to fire a bogus "container resume FAILED" on every run.
+  local snap; snap=$(state_get .snapshot)
+  local summary; summary="snapshot ${snap:-n/a}; $(state_get '.sends|to_entries|map("\(.key): \(.value.status)")|join(", ")')"
+  local ctr; ctr=$(state_get '[.containers[]|select(.running)|.name]|join(", ")')
+  [ -n "$ctr" ] && summary="$summary; containers: $ctr"
+  local nfail; nfail=$(state_get '.resume_failed // [] | length')
+  local errs; errs=$(state_get '.errors|join("; ")'); local warns; warns=$(state_get '.warnings|join("; ")')
+  local down; down=$(state_get '(.resume_failed // [])|join(", ")')
+  if [ "${nfail:-0}" != 0 ]; then
+    notify alert "Shive [$SCHED_NAME]: container resume FAILED" \
+      "Containers still DOWN: $down. Start them manually! $summary" "Shive: container resume FAILED"
+  elif [ "$status" = failed ]; then
+    notify alert "Shive [$SCHED_NAME${SEND_ONLY:+ / $SEND_ONLY send}]: job failed" "$errs. $summary"
+  elif [ "$status" = warning ]; then
+    notify warning "Shive [$SCHED_NAME]: completed with warnings" "$warns. $summary"
+  elif [ "$NOTIFY_ON_SUCCESS" = yes ] && [ "$(sq "$SCHED_JSON" .notify_success)" = true ]; then
+    notify normal "Shive [$SCHED_NAME${SEND_ONLY:+ / $SEND_ONLY send}]: success" "$summary"
+  fi
+  # persist compact last-status to flash (small file, once per run), then retire the state file
+  if [ "$DRY_RUN" = 1 ]; then
+    rm -f "$STATE_FILE"        # a dry-run changed nothing: leave no state behind to be recovered
+  else
+    mkdir -p "$SHIVE_PLG/state"
+    jq '{schedule,mode,started,finished,status,snapshot,containers:[.containers[]|.name],resume_failed:(.resume_failed//[]),sends,errors,warnings,log}' \
+      "$STATE_FILE" > "$SHIVE_PLG/state/$STATEKEY.last.json"
+    mv "$STATE_FILE" "$SHIVE_VAR/state/$STATEKEY.done.json"
+    $SHIVE_CLI status-rebuild >/dev/null 2>&1 || true
+  fi
+  log "=== run finished: $status (rc=$rc) ==="
+  exit $rc
+}
+trap finalize EXIT
+trap 'log "signal received - aborting"; exit 130' INT TERM
+
+# ---- PRECHECK ---------------------------------------------------------------
+phase PRECHECK
+array_started || { add_error "array not started"; exit 1; }
+# A dataset restore in progress has its own containers stopped and is rewriting live data - a
+# snapshot now would capture a half-restored state, and our resume would start its containers.
+busy=$(active_runs | grep '^restore-' | head -1)
+if [ -n "$busy" ] && [ -z "$SEND_ONLY" ]; then
+  add_warning "a dataset restore is in progress ($busy) - this run was skipped, the next scheduled run takes over"; exit 0
+fi
+# A source dataset that is gone (deliberately destroyed, pool not imported) must not take the
+# whole schedule down with it - the other datasets still need their snapshots. Skip it with a
+# warning and carry on; only an empty remainder is a hard failure.
+AVAILABLE=()
+for ds in "${DATASETS[@]}"; do
+  if ! dataset_exists "$ds"; then
+    add_warning "source dataset '$ds' does not exist - skipped"
+    continue
+  fi
+  h=$(pool_health "$(pool_of "$ds")")
+  case "$h" in
+    ONLINE)   AVAILABLE+=("$ds");;
+    DEGRADED) add_warning "source pool $(pool_of "$ds") is DEGRADED"; AVAILABLE+=("$ds");;
+    *)        add_warning "source pool $(pool_of "$ds") health=$h - '$ds' skipped";;
+  esac
+done
+if [ ${#AVAILABLE[@]} -eq 0 ]; then
+  add_error "no source dataset available (checked: ${DATASETS[*]})"; exit 1
+fi
+[ ${#AVAILABLE[@]} -ne ${#DATASETS[@]} ] && log "continuing with ${#AVAILABLE[@]} of ${#DATASETS[@]} source datasets"
+DATASETS=("${AVAILABLE[@]}")
+if [ "$SEND_LOCAL" = true ]; then
+  t_parse "local:$LOCAL_DS"
+  h=$(t_pool_health)
+  if [ "$h" != ONLINE ]; then
+    add_warning "local target pool $(pool_of "$LOCAL_DS") not ONLINE ($h) - local send skipped"; SEND_LOCAL=false
+    state_set '.sends.local={status:"skipped",reason:$r}' --arg r "pool $h"
+  elif ! t_dataset_exists "$LOCAL_DS"; then
+    add_warning "local backup root '$LOCAL_DS' does not exist - local send skipped"; SEND_LOCAL=false
+    state_set '.sends.local={status:"skipped",reason:"root missing"}'
+  fi
+fi
+if [ "$SEND_REMOTE" = true ]; then
+  t_parse "$REMOTE_SPEC"
+  if ! t_reachable; then
+    add_warning "remote $T_HOST unreachable - remote send skipped"; SEND_REMOTE=false
+    state_set '.sends.remote={status:"skipped",reason:"unreachable"}'
+  elif [ "$(t_pool_health)" != ONLINE ]; then
+    add_warning "remote pool $(pool_of "$T_DS") not ONLINE - remote send skipped"; SEND_REMOTE=false
+    state_set '.sends.remote={status:"skipped",reason:"pool not online"}'
+  elif ! t_dataset_exists "$T_DS"; then
+    add_warning "remote backup root '$T_DS' does not exist - remote send skipped"; SEND_REMOTE=false
+    state_set '.sends.remote={status:"skipped",reason:"root missing"}'
+  fi
+fi
+
+if [ -n "$SEND_ONLY" ]; then
+  # send-only: reuse the newest snapshot this schedule already took. -I carries every
+  # intermediate snapshot since the target's last one, so nothing is skipped.
+  phase SELECT_SNAPSHOT
+  SNAP=$(zfs list -H -o name -s creation -t snapshot -d 1 "${DATASETS[0]}" 2>/dev/null | sed 's/.*@//' | grep "^$PREFIX" | tail -1)
+  [ -n "$SNAP" ] || { add_error "no $PREFIX* snapshot on ${DATASETS[0]} yet - run the snapshot job first"; exit 1; }
+  state_set '.snapshot=$s' --arg s "$SNAP"
+  log "send-only ($SEND_ONLY): using existing snapshot $SNAP"
+else
+
+# ---- QUIESCE ----------------------------------------------------------------
+phase QUIESCE
+guard_prepare
+guard_quiesce || { add_error "quiesce failed - aborting before snapshot (containers will be resumed)"; exit 1; }
+
+# ---- SNAPSHOT ---------------------------------------------------------------
+phase SNAPSHOT
+# Work out exactly which datasets get a snapshot BEFORE picking the name, so the same-minute
+# collision check can look at all of them. Checking only the first source's subtree (as this used
+# to) misses a collision on a second source dataset, or on a tree whose shape changed because of
+# exclusions - and `zfs snapshot` fails the whole batch if any single name already exists.
+SNAP_DATASETS=()
+if [ "$RECURSIVE" = true ] && [ ${#EXCLUDE_SNAP[@]} -gt 0 ]; then
+  for ds in "${DATASETS[@]}"; do
+    while IFS= read -r d; do
+      [ -n "$d" ] || continue
+      is_excluded "$d" "${EXCLUDE_SNAP[@]}" && { log "excluded from snapshot: $d"; continue; }
+      SNAP_DATASETS+=("$d")
+    done < <(zfs list -H -r -o name "$ds" 2>/dev/null)
+  done
+  [ ${#SNAP_DATASETS[@]} -gt 0 ] || { add_error "every dataset is excluded - nothing to snapshot"; exit 1; }
+elif [ "$RECURSIVE" = true ]; then
+  for ds in "${DATASETS[@]}"; do
+    while IFS= read -r d; do [ -n "$d" ] && SNAP_DATASETS+=("$d"); done < <(zfs list -H -r -o name "$ds" 2>/dev/null)
+  done
+else
+  SNAP_DATASETS=("${DATASETS[@]}")
+fi
+
+SNAP="$PREFIX$(tag_now)"
+for d in "${SNAP_DATASETS[@]}"; do
+  if zfs list -H -o name "$d@$SNAP" >/dev/null 2>&1; then
+    SNAP="$SNAP-$(date +%S)"                 # same-minute collision: disambiguate by seconds
+    log "snapshot name already in use on $d - using $SNAP instead"
+    break
+  fi
+done
+
+# `zfs snapshot -r` has no exclude option, so when exclusions exist we pass every wanted dataset to
+# ONE `zfs snapshot` call - that form is still atomic, so all datasets keep the identical point in
+# time that -r would have given us.
+if [ "$RECURSIVE" = true ] && [ ${#EXCLUDE_SNAP[@]} -gt 0 ]; then
+  SNAP_TARGETS=(); for d in "${SNAP_DATASETS[@]}"; do SNAP_TARGETS+=("$d@$SNAP"); done
+  run_cmd zfs snapshot "${SNAP_TARGETS[@]}" || { add_error "snapshot failed"; exit 1; }
+else
+  for ds in "${DATASETS[@]}"; do
+    run_cmd zfs snapshot $RFLAG "$ds@$SNAP" || { add_error "snapshot of $ds failed"; exit 1; }
+  done
+fi
+state_set '.snapshot=$s' --arg s "$SNAP"
+log "snapshot $SNAP taken on ${DATASETS[*]}"
+
+# ---- RESUME (right after snapshot – sends may take long) --------------------
+phase RESUME
+guard_resume || log "resume reported failures - continuing with sends, alert follows"
+fi
+
+# ---- SEND -------------------------------------------------------------------
+# shive-send explains a failure on its own FATAL line in the shared run log; carry that reason into
+# the recorded error so it reaches the notification and the History tab, not just the log file.
+send_failure_reason() { grep -o 'FATAL: .*' "$LOG_FILE" 2>/dev/null | tail -1 | sed 's/^FATAL: //; s/\.$//'; }
+# shellcheck disable=SC2046  # the $( ... && echo --flag ) idiom below relies on word splitting
+#                               to add optional arguments; the values are fixed literals
+do_send() { # <location> <target-root-spec> <excluded...>
+  local loc="$1" root="$2"; shift 2
+  local excl=("$@") ok=1 ds tgt spec r
+  phase "SEND_${loc^^}"
+  for ds in "${DATASETS[@]}"; do
+    t_parse "$root"; tgt=$(target_for "$T_DS" "$ds")
+    [ "$T_TYPE" = local ] && spec="local:$tgt" || spec="${root%/$T_DS}/$tgt"
+
+    if [ "$RECURSIVE" != true ] || [ ${#excl[@]} -eq 0 ]; then
+      # no exclusions: one -R stream for the whole tree, as before
+      if ! "$SHIVE_EMHTTP/scripts/shive-send" --sched "$SCHED_ID" --from "$ds@$SNAP" --to "$spec" \
+           $( [ "$RECURSIVE" = true ] && echo --recursive ) --exclude-props "$EXCL" $( [ $DRY_RUN = 1 ] && echo --dry-run ); then
+        r=$(send_failure_reason); add_error "$loc send of $ds failed${r:+: $r}"; ok=0
+      fi
+      continue
+    fi
+
+    # `zfs send -R` cannot skip datasets, so send each one on its own. zfs list returns parents
+    # before children, so each dataset's parent already exists on the target when its turn comes.
+    local d rel child_spec
+    while IFS= read -r d; do
+      [ -n "$d" ] || continue
+      is_excluded "$d" "${EXCLUDE_SNAP[@]}" && { log "excluded from $loc send: $d (excluded from the snapshot itself)"; continue; }
+      # Real runs only: a dataset that appeared between snapshotting and sending has no real
+      # snapshot to send even though it isn't configured as excluded - skip it, don't fail.
+      # (Dry-run never creates a real snapshot, so this check would wrongly skip everything.)
+      if [ "$DRY_RUN" != 1 ] && ! zfs list -H -o name "$d@$SNAP" >/dev/null 2>&1; then
+        log "no snapshot on $d - appeared after snapshotting, skipping"; continue
+      fi
+      if is_excluded "$d" "${excl[@]}"; then log "excluded from $loc send: $d"; continue; fi
+      rel="${d#"$ds"}"                                             # "" for the root, "/child" below
+      [ "$T_TYPE" = local ] && child_spec="local:$tgt$rel" || child_spec="${root%/$T_DS}/$tgt$rel"
+      if ! "$SHIVE_EMHTTP/scripts/shive-send" --sched "$SCHED_ID" --from "$d@$SNAP" --to "$child_spec" \
+           --exclude-props "$EXCL" $( [ $DRY_RUN = 1 ] && echo --dry-run ); then
+        r=$(send_failure_reason); add_error "$loc send of $d failed${r:+: $r}"; ok=0
+      fi
+    done < <(zfs list -H -r -o name "$ds" 2>/dev/null)
+  done
+  if [ $ok = 1 ]; then state_set '.sends[$l]={status:"ok",snapshot:$s,finished:$t}' --arg l "$loc" --arg s "$SNAP" --arg t "$(date -Is)"
+  else state_set '.sends[$l]={status:"failed",snapshot:$s}' --arg l "$loc" --arg s "$SNAP"; fi
+}
+[ "$SEND_LOCAL"  = true ] && do_send local  "local:$LOCAL_DS" "${EXCLUDE_LOCAL[@]}"
+[ "$SEND_REMOTE" = true ] && do_send remote "$REMOTE_SPEC" "${EXCLUDE_REMOTE[@]}"
+
+# ---- PRUNE ------------------------------------------------------------------
+if [ $NO_PRUNE = 0 ]; then
+  phase PRUNE
+  # shellcheck disable=SC2046  # same optional-flag idiom as do_send()
+  for ds in "${DATASETS[@]}"; do
+    [ -n "$SEND_ONLY" ] || "$SHIVE_EMHTTP/scripts/shive-prune" --sched "$SCHED_ID" --location source --dataset "$ds" \
+      $( [ "$RECURSIVE" = true ] && echo --recursive ) $( [ $DRY_RUN = 1 ] && echo --dry-run ) \
+      || add_warning "prune (source) of $ds failed"
+    if [ "$SEND_LOCAL" = true ]; then
+      t_parse "local:$LOCAL_DS"
+      "$SHIVE_EMHTTP/scripts/shive-prune" --sched "$SCHED_ID" --location local --dataset "$(target_for "$LOCAL_DS" "$ds")" \
+        $( [ "$RECURSIVE" = true ] && echo --recursive ) $( [ $DRY_RUN = 1 ] && echo --dry-run ) \
+        || add_warning "prune (local) of $ds failed"
+    fi
+    if [ "$SEND_REMOTE" = true ]; then
+      t_parse "$REMOTE_SPEC"
+      "$SHIVE_EMHTTP/scripts/shive-prune" --sched "$SCHED_ID" --location remote --dataset "$(target_for "$T_DS" "$ds")" \
+        --target "$REMOTE_SPEC" $( [ "$RECURSIVE" = true ] && echo --recursive ) $( [ $DRY_RUN = 1 ] && echo --dry-run ) \
+        || add_warning "prune (remote) of $ds failed"
+    fi
+  done
+fi
+exit 0

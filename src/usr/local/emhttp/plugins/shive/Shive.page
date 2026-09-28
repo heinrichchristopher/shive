@@ -1,0 +1,7 @@
+Menu="Utilities"
+Type="xmenu"
+Title="Shive"
+Icon="shive-line.png"
+Tabs="true"
+Cond="version_compare(parse_ini_file('/etc/unraid-version')['version'],'7.2.0-beta','>=')"
+---

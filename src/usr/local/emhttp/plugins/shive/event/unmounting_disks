@@ -1,0 +1,4 @@
+#!/bin/bash
+# disks unmounting: restore clones would block pool export -> destroy them all
+/usr/local/emhttp/plugins/shive/scripts/shive-restore unstage --all || true
+rm -f /var/local/shive/locks/*.lock

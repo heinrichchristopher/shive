@@ -1,0 +1,12 @@
+# build output (packages are attached to GitHub releases, not committed)
+/build/
+*.txz
+
+# editor / OS noise
+*.swp
+*~
+.DS_Store
+
+# Claude Code: personal settings and notes, not for the public repo
+.claude/settings.local.json
+CLAUDE.local.md

@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+# findmnt -no SOURCE,FSTYPE -T <path>  -> longest matching fake-zfs mountpoint
+import sys, json, os
+s = json.load(open('/tmp/fakezfs.json'))
+p = sys.argv[-1]
+best=None
+for n,d in s['ds'].items():
+    m=d['props']['mountpoint']
+    if p==m or p.startswith(m+'/'):
+        if best is None or len(m)>len(best[1]): best=(n,m)
+print(f"{best[0]} zfs" if best else "/dev/sda1 ext4")

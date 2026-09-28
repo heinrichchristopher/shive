@@ -1,0 +1,26 @@
+Menu="Shive:3"
+Title="Snapshots & Restore"
+Tabs="true"
+Markdown="false"
+---
+<?php require_once '/usr/local/emhttp/plugins/shive/include/head.php'; ?>
+<div class="shive" id="shive-browser">
+  <dl><dt>Location</dt><dd><select id="b-target"><option value="local">this server</option></select> <select id="b-dataset" style="min-width:20rem"></select>
+    <label><input type="checkbox" id="b-all"> show all snapshots (not only Shive)</label> <input type="button" value="List snapshots" onclick="Shive.br.snaps()"></dd></dl>
+  <p class="shive-hint">★ marks a snapshot as <b>important</b>: retention will never delete it, and it does not occupy a GFS slot. Stored as the ZFS property <span class="shive-mono">shive:important</span> on the snapshot itself.</p>
+  <div class="TableContainer">
+  <table class="tablesorter shift shive-table">
+    <thead><tr><th>Keep</th><th>Snapshot</th><th>Schedule</th><th>Created</th><th>Used</th><th>Referenced</th><th>Actions</th></tr></thead>
+    <tbody id="b-rows"><tr><td colspan="7">select a dataset</td></tr></tbody>
+  </table>
+  </div>
+  <div id="b-tree" class="shive-panel" style="display:none">
+    <h3>Browse <span id="b-tree-title"></span></h3>
+    <div id="b-crumbs" class="shive-crumbs"></div>
+    <p class="shive-hint">★ marks a snapshot as <b>important</b>: retention will never delete it, and it does not occupy a GFS slot. Stored as the ZFS property <span class="shive-mono">shive:important</span> on the snapshot itself.</p>
+  <div class="TableContainer"><table class="shive-table"><thead><tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr></thead><tbody id="b-tree-rows"></tbody></table></div>
+    <p><span class="buttons-spaced"><input type="button" value="Restore this folder…" onclick="Shive.br.restoreDialog('')"> <input type="button" value="Close" onclick="Shive.br.closeTree()"></span></p>
+  </div>
+  <div id="b-out" class="shive-panel" style="display:none"><h3>Result</h3><pre id="b-out-pre"></pre></div>
+</div>
+<script>$(function(){ Shive.br.init(); });</script>

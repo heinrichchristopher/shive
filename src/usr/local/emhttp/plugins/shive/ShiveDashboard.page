@@ -1,0 +1,30 @@
+Menu="Dashboard:0"
+Cond="version_compare(parse_ini_file('/etc/unraid-version')['version'],'7.2.0-beta','>=')"
+---
+<?php
+/* Shive dashboard tile (Unraid >= 7.2 responsive tile structure).
+   Everything is emitted from PHP: raw HTML outside a PHP block would be mangled by the
+   .page markdown pass. Live refresh every 30 s via js/shive-tile.js -> api.php?op=status */
+$shiveStatus = json_decode((string)@file_get_contents('/var/local/shive/status.json'), true) ?: ['health' => 'warning', 'schedules' => []];
+$shiveIcon = ['ok' => 'fa-check-circle', 'warning' => 'fa-exclamation-triangle', 'error' => 'fa-times-circle'][$shiveStatus['health']] ?? 'fa-question-circle';
+$mytiles['shive']['column2'] = <<<EOT
+<tbody title="_(Shive ZFS snapshots)_">
+<tr><td>
+  <span class='tile-header'>
+    <span class='tile-header-left'>
+      <img src='/plugins/shive/images/shive-line.png' class='shive-tile-logo' alt=''>
+      <div class='section'><h3 class='tile-header-main'>_(Shive)_</h3><span id='shive-tile-sub'>_(ZFS snapshots & replication)_</span></div>
+    </span>
+    <span class='tile-header-right'>
+      <span class='tile-ctrl'><span id='shive-tile-health' class='shive-health-{$shiveStatus['health']}'><i class='fa {$shiveIcon}'></i></span></span>
+      <span class='tile-header-right-controls'><a href='/Settings/Shive' title='_(Open Shive)_'><i class='fa fa-cog control'></i></a></span>
+    </span>
+  </span>
+</td></tr>
+<tr><td><div id='shive-tile-body'>loading…</div></td></tr>
+</tbody>
+EOT;
+$shiveV = @filemtime('/usr/local/emhttp/plugins/shive/js/shive-tile.js') ?: 0;
+echo "<link rel='stylesheet' href='/plugins/shive/css/shive-tile.css?v=$shiveV'>";
+echo "<script src='/plugins/shive/js/shive-tile.js?v=$shiveV'></script>";
+?>

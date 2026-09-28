@@ -1,0 +1,18 @@
+Menu="Shive:5"
+Title="Settings"
+Tabs="true"
+Markdown="false"
+---
+<?php require_once '/usr/local/emhttp/plugins/shive/include/head.php'; ?>
+<div class="shive" id="shive-settings">
+  <dl><dt>Log directory</dt><dd><input type="text" id="c-LOG_DIR" style="width:24rem"> <span class="shive-hint">default /var/log/shive (RAM, cleared on reboot); point at a dataset path to keep logs</span></dd></dl>
+  <dl><dt>Notify on success</dt><dd><select id="c-NOTIFY_ON_SUCCESS"><option value="yes">yes</option><option value="no">no (warnings/errors only)</option></select></dd></dl>
+  <dl><dt>Docker stop timeout (s)</dt><dd><input type="number" id="c-DOCKER_STOP_TIMEOUT" min="5" max="600" style="width:6rem"></dd></dl>
+  <dl><dt>SSH private key</dt><dd><input type="text" id="c-SSH_KEY" style="width:24rem" placeholder="/root/.ssh/id_ed25519 (empty = ssh default)"></dd></dl>
+  <dl><dt>SSH options</dt><dd><input type="text" id="c-SSH_OPTS" style="width:36rem"></dd></dl>
+  <dl><dt>Catch up missed runs at array start</dt><dd><select id="c-CATCHUP_ON_START"><option value="yes">yes</option><option value="no">no</option></select></dd></dl>
+  <dl><dt>Restore clone TTL (s)</dt><dd><input type="number" id="c-RESTORE_CLONE_TTL" min="300" style="width:8rem"> <span class="shive-hint">staged read-only clones are destroyed after this time</span></dd></dl>
+  <dl><dt>Pre-restore snapshots to keep</dt><dd><input type="number" id="c-PRERESTORE_KEEP" min="1" max="20" style="width:5rem"></dd></dl>
+  <dl><dt>&nbsp;</dt><dd><span class="buttons-spaced"><button type="button" id="shive-cfg-apply" class="shive-force-btn" onclick="Shive.cfg.save()">Apply</button></span> <span id="cfg-msg" class="shive-hint"></span></dd></dl>
+</div>
+<script>$(function(){ Shive.cfg.load(); });</script>

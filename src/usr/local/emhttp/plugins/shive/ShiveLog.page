@@ -1,0 +1,12 @@
+Menu="Shive:4"
+Title="History & Logs"
+Tabs="true"
+Markdown="false"
+---
+<?php require_once '/usr/local/emhttp/plugins/shive/include/head.php'; ?>
+<div class="shive" id="shive-log">
+  <div id="log-history"></div>
+  <dl><dt>Log file</dt><dd><select id="log-select" style="min-width:24rem"></select> <span class="buttons-spaced"><input type="button" value="View" onclick="Shive.log.view()"> <input type="button" value="Refresh" onclick="Shive.log.init()"></span></dd></dl>
+  <pre id="log-content" class="shive-log"></pre>
+</div>
+<script>$(function(){ Shive.log.init(); });</script>

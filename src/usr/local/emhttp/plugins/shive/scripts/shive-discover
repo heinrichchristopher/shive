@@ -1,0 +1,3 @@
+#!/bin/bash
+# shive-discover – rebuild the container->dataset discovery cache (pretty-printed).
+exec php /usr/local/emhttp/plugins/shive/include/cli.php discover "$@"

@@ -1,0 +1,97 @@
+<?xml version='1.0' standalone='yes'?>
+<!DOCTYPE PLUGIN [
+<!ENTITY name      "shive">
+<!ENTITY author    "heinrichchristopher">
+<!ENTITY version   "2026.09.28">
+<!ENTITY launch    "Settings/Shive">
+<!ENTITY gitURL    "https://raw.githubusercontent.com/heinrichchristopher/shive/main">
+<!ENTITY pluginURL "&gitURL;/shive.plg">
+<!ENTITY pkgURL    "https://github.com/heinrichchristopher/shive/releases/download/&version;">
+<!ENTITY pkgName   "shive-&version;-noarch-1.txz">
+<!ENTITY pkgMD5    "fcfa026e4100ab9fc7c9c08e7ec7d4fb">
+<!ENTITY plgPath   "/boot/config/plugins/&name;">
+<!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
+]>
+
+<PLUGIN name="&name;" author="&author;" version="&version;" launch="&launch;"
+        pluginURL="&pluginURL;" min="7.2.0" icon="shive.png"
+        support="https://github.com/heinrichchristopher/shive/issues">
+
+<CHANGES>
+###2026.09.28
+- Initial public release: ZFS snapshot schedules with GFS/age retention, optional Docker
+  quiesce/resume, local + SSH replication (-I incremental, bookmark base), snapshot
+  browser/restore, dashboard tile, Unraid notifications.
+</CHANGES>
+
+<!-- ================================================================== -->
+<!-- pre-install: sanity checks                                          -->
+<!-- ================================================================== -->
+<FILE Run="/bin/bash">
+<INLINE>
+set -e
+for bin in zfs zpool jq docker php rsync flock findmnt; do
+  command -v "$bin" >/dev/null 2>&amp;1 || { echo "shive: required binary '$bin' not found"; exit 1; }
+done
+mkdir -p &plgPath;/schedules &plgPath;/state
+[ -f &plgPath;/shive.cfg ] || cat > &plgPath;/shive.cfg &lt;&lt;'CFG'
+LOG_DIR="/var/log/shive"
+NOTIFY_ON_SUCCESS="yes"
+DOCKER_STOP_TIMEOUT="60"
+SSH_KEY=""
+SSH_OPTS="-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"
+CATCHUP_ON_START="yes"
+RESTORE_CLONE_TTL="7200"
+PRERESTORE_KEEP="3"
+CFG
+[ -f &plgPath;/mappings.json ] || echo '{}' > &plgPath;/mappings.json
+</INLINE>
+</FILE>
+
+<!-- ================================================================== -->
+<!-- package download + install                                          -->
+<!-- ================================================================== -->
+<FILE Name="&plgPath;/&pkgName;" Run="upgradepkg --install-new">
+<URL>&pkgURL;/&pkgName;</URL>
+<MD5>&pkgMD5;</MD5>
+</FILE>
+
+<!-- ================================================================== -->
+<!-- post-install: permissions, cron, recovery, status                   -->
+<!-- ================================================================== -->
+<FILE Run="/bin/bash">
+<INLINE>
+set -e
+chmod 0755 &emhttp;/scripts/shive-* &emhttp;/event/*
+mkdir -p /var/local/shive/{state,locks,restore} /var/log/shive
+# regenerate cron from schedules (idempotent) and run container-resume safety net
+php &emhttp;/include/cli.php cron-write
+&emhttp;/scripts/shive-recover || true
+php &emhttp;/include/cli.php status-rebuild || true
+echo ""
+echo "-----------------------------------------------------------"
+echo " shive &version; installed. Settings -> Shive"
+echo "-----------------------------------------------------------"
+</INLINE>
+</FILE>
+
+<!-- ================================================================== -->
+<!-- remove                                                              -->
+<!-- ================================================================== -->
+<FILE Run="/bin/bash" Method="remove">
+<INLINE>
+# stop running jobs gracefully
+pkill -TERM -f "&emhttp;/scripts/shive-run" 2>/dev/null || true
+sleep 2
+# resume anything left quiesced
+&emhttp;/scripts/shive-recover || true
+rm -f &plgPath;/shive.cron /boot/config/plugins/dynamix/shive.cron
+update_cron
+removepkg &name; 2>/dev/null || true
+rm -rf &emhttp; /var/local/shive
+# NOTE: &plgPath; (schedules, mappings, last-status) is intentionally kept.
+echo "shive removed. Config left in &plgPath; - delete manually if unwanted."
+</INLINE>
+</FILE>
+
+</PLUGIN>
