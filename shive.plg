@@ -2,13 +2,13 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "shive">
 <!ENTITY author    "heinrichchristopher">
-<!ENTITY version   "2026.09.28">
+<!ENTITY version   "2026.11.22">
 <!ENTITY launch    "Settings/Shive">
 <!ENTITY gitURL    "https://raw.githubusercontent.com/heinrichchristopher/shive/main">
 <!ENTITY pluginURL "&gitURL;/shive.plg">
 <!ENTITY pkgURL    "https://github.com/heinrichchristopher/shive/releases/download/&version;">
 <!ENTITY pkgName   "shive-&version;-noarch-1.txz">
-<!ENTITY pkgMD5    "fcfa026e4100ab9fc7c9c08e7ec7d4fb">
+<!ENTITY pkgMD5    "76b352f4df770f6d06f55c16783c5049">
 <!ENTITY plgPath   "/boot/config/plugins/&name;">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
 ]>
@@ -18,6 +18,14 @@
         support="https://github.com/heinrichchristopher/shive/issues">
 
 <CHANGES>
+###2026.11.22
+- Containers tab: start order is now a drag &amp; drop list with container icons and names
+  (sequence + "not in sequence" pool; arrow buttons and Alt+Up/Down for keyboard use). Storage
+  format unchanged - existing start orders are carried over as they are.
+- Container icons from Unraid's local icon cache (never fetched from the network).
+- Refreshed look: cards, status pills, coloured history cards, theme-safe colours for dark themes.
+- Same-day releases now use a letter suffix (YYYY.MM.DDa, b, c, ...).
+
 ###2026.09.28
 - Initial public release: ZFS snapshot schedules with GFS/age retention, optional Docker
   quiesce/resume, local + SSH replication (-I incremental, bookmark base), snapshot

@@ -6,6 +6,27 @@ declare(strict_types=1);
 require_once __DIR__ . '/config.php';
 
 const SHIVE_DISCOVERY = SHIVE_VAR . '/discovery.json';
+// Where Unraid's Docker manager keeps the container icons it already downloaded: the RAM copy the
+// webGUI serves, the docker.img copy, the flash copy. Shive only ever reads these local files - it
+// never fetches an icon URL itself (no network access from a settings page).
+const SHIVE_ICON_DIRS = [
+  '/usr/local/emhttp/state/plugins/dynamix.docker.manager/images',
+  '/var/lib/docker/unraid/images',
+  '/boot/config/plugins/dockerMan/images',
+];
+
+/* local PNG icon for a container, or null. The name is validated against Docker's own name rule
+   (no '/', cannot start with '.'), so it cannot leave the icon directories; only real PNGs under
+   1 MiB are returned, so the icon endpoint can never be turned into a generic file reader. */
+function docker_icon_file(string $name): ?string {
+  if (!preg_match('/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}$/', $name)) return null;
+  foreach (SHIVE_ICON_DIRS as $dir) {
+    $f = "$dir/$name-icon.png";
+    if (!is_file($f) || ($sz = filesize($f)) === false || $sz < 8 || $sz > 1048576) continue;
+    if (@file_get_contents($f, false, null, 0, 8) === "\x89PNG\r\n\x1a\n") return $f;
+  }
+  return null;
+}
 
 function docker_mappings(): array {
   $m = json_decode((string)@file_get_contents(SHIVE_PLG . '/mappings.json'), true);
@@ -72,11 +93,11 @@ function docker_discover(bool $refresh = false): array {
         $d = docker_path_to_dataset($mt['Source'], $pools);
         if ($d) $ds[$d] = true;
       }
-      $containers[$name] = ['name' => $name, 'running' => $running === 'true', 'datasets' => array_keys($ds), 'mounts' => $paths, 'override' => null, 'order' => 0, 'wait' => 0];
+      $containers[$name] = ['name' => $name, 'running' => $running === 'true', 'datasets' => array_keys($ds), 'mounts' => $paths, 'override' => null, 'order' => 0, 'wait' => 0, 'icon' => docker_icon_file($name) !== null];
     }
   }
   foreach (docker_mappings() as $name => $ov) {
-    if (!isset($containers[$name])) $containers[$name] = ['name' => $name, 'running' => false, 'datasets' => [], 'mounts' => [], 'override' => null, 'order' => 0, 'wait' => 0, 'missing' => true];
+    if (!isset($containers[$name])) $containers[$name] = ['name' => $name, 'running' => false, 'datasets' => [], 'mounts' => [], 'override' => null, 'order' => 0, 'wait' => 0, 'icon' => false, 'missing' => true];
     if (!empty($ov['ignore'])) { $containers[$name]['datasets'] = []; $containers[$name]['override'] = 'ignore'; }
     elseif (!empty($ov['datasets'])) { $containers[$name]['datasets'] = array_values($ov['datasets']); $containers[$name]['override'] = 'manual'; }
     // Start order and post-start wait. A dependency ("redis before the app") is a property of the

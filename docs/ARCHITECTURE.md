@@ -743,6 +743,25 @@ early unless `.quiesced` is true - which a dry-run no longer sets, so the dry-ru
 showing its start plan. Dry-runs now bypass that guard: the preview is the entire point of a
 dry-run.
 
+## Start order as a drag & drop list, container icons (2026-11-22)
+
+The number fields for `order` were hard to read once more than a handful of containers had one.
+The Containers tab now shows two lists - the sequence and the unordered pool - and the GUI maps
+position *i* to `order = (i+1)*10` on save (step 1 if more than 99 containers are in the sequence,
+because `order` is clamped to 999). The **storage format and the runner are unchanged**, so every
+existing `mappings.json` keeps working and the run.sh order checks still pin the semantics. The
+pool is shown honestly as "starts first, A-Z": `sort_by(.order // 0)` puts order 0 before any
+positive order. Containers that are currently missing keep the order they had on save.
+
+Drag & drop uses pointer events, not the HTML5 drag API, which does nothing on touch screens.
+The grip is the only drag handle (`touch-action:none` there) so a phone can still scroll the page
+by swiping the rest of a row. Up/down/remove buttons and Alt+arrow keys cover keyboard use.
+
+Icons come from Unraid's own local icon cache (`docker_icon_file()`: RAM copy, docker.img copy,
+flash copy) through `api.php?op=icon`, the one non-JSON op. It never fetches the template's icon
+URL (no network from a settings page), validates the name against Docker's name rule (no `/`, no
+leading `.`) and only returns real PNGs under 1 MiB, so it cannot be turned into a file reader.
+
 ## Release process: local build in a pinned container (2026-09-28)
 
 A release is built once, by hand, in a pinned container (`python:3.12-slim` by digest, plus
