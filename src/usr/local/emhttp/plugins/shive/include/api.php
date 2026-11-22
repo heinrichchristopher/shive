@@ -43,6 +43,17 @@ switch ($op) {
   /* ---- inventory ---- */
   case 'datasets': reply(['ok' => true, 'pools' => array_values(zfs_pools()), 'datasets' => array_values(zfs_datasets())]);
   case 'containers': reply(['ok' => true] + docker_discover(!empty($in['refresh'])));
+  case 'icon':
+    // The one non-JSON response: the container's PNG icon for the Containers tab, 404 if Unraid
+    // has none cached (the GUI then shows a generic glyph). See docker_icon_file() for the limits.
+    $f = docker_icon_file((string)($in['name'] ?? ''));
+    if ($f === null) { http_response_code(404); header('Content-Type: text/plain'); exit; }
+    header('Content-Type: image/png');
+    header('X-Content-Type-Options: nosniff');
+    header('Cache-Control: private, max-age=86400');
+    header('Content-Length: ' . filesize($f));
+    readfile($f);
+    exit;
   case 'mappings': reply(['ok' => true, 'mappings' => docker_mappings()]);
   case 'mappings_save': if (!$post) fail('POST'); docker_mappings_save($json('mappings') ?: []); docker_discover(true); reply(['ok' => true]);
 

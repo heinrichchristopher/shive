@@ -529,6 +529,15 @@ $S/shive-run $IDN --dry-run >/dev/null 2>&1 & sleep 0.3; kill -9 %1 2>/dev/null;
 : > /tmp/docker.log; $S/shive-recover --quiet >/dev/null 2>&1
 check "an interrupted dry-run triggers no bogus recovery" "[ \"\$(grep -c '^start ' /tmp/docker.log)\" = 0 ]"
 check "order/wait clamped and junk rejected on save"      "A POST 'op=mappings_save&mappings={\"x\":{\"order\":\"9999\",\"wait\":-5},\"y\":{\"order\":\"abc\"}}' | jq -e .ok && [ \"\$(jq -r '.x.order' /boot/config/plugins/shive/mappings.json)\" = 999 ] && jq -e '.x.wait==null and .y==null' /boot/config/plugins/shive/mappings.json"
+# container icons for the drag&drop start-order list: only Unraid's local icon cache, only real PNGs
+ICD=/usr/local/emhttp/state/plugins/dynamix.docker.manager/images; mkdir -p $ICD
+printf '\x89PNG\r\n\x1a\nfakeicon' > $ICD/orddb-icon.png; echo 'not a png' > $ICD/ordapp-icon.png
+printf '\x89PNG\r\n\x1a\nsecret' > /tmp/evil-icon.png
+check "icon op serves the cached container PNG"           "[ \"\$(A GET 'op=icon&name=orddb')\" = \"\$(cat $ICD/orddb-icon.png)\" ]"
+check "icon op refuses non-PNG files"                     "[ -z \"\$(A GET 'op=icon&name=ordapp')\" ]"
+check "icon op refuses path traversal"                    "[ -z \"\$(A GET 'op=icon&name=../../../../tmp/evil')\" ] && [ -z \"\$(A GET 'op=icon&name=.evil')\" ]"
+check "discovery flags which containers have an icon"     "A GET 'op=containers&refresh=1' | jq -e '.containers.orddb.icon==true and .containers.ordapp.icon==false'"
+rm -f $ICD/orddb-icon.png $ICD/ordapp-icon.png /tmp/evil-icon.png
 echo '{}' > /boot/config/plugins/shive/mappings.json
 php -r "require '$SRC/include/config.php'; shive_schedule_delete('$IDN');" >/dev/null 2>&1
 zfs destroy -r pin/ord >/dev/null 2>&1; rm -rf /mnt/pin/ord

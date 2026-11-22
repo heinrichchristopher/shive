@@ -1,33 +1,73 @@
-.shive .shive-panel{margin-top:1rem;padding:1rem;border:1px solid var(--gray-300,#ccc);border-radius:4px}
+/* shive – WebGUI styles. Colours are Unraid's theme variables where they exist; everything neutral
+   is a translucent grey, so the same rules read correctly on the white, black, gray and azure
+   themes without per-theme overrides. */
+.shive{--sh-line:rgba(128,128,128,.28);--sh-soft:rgba(128,128,128,.06);--sh-soft2:rgba(128,128,128,.13);
+  --sh-accent:var(--orange,#f15a2c);--sh-ok:var(--green-500,#3fa45b);--sh-warn:var(--orange-500,#e8a23a);
+  --sh-err:var(--red-500,#d9534f);--sh-info:var(--blue-500,#337ab7);--sh-r:8px}
+
+/* ---- cards / panels */
+.shive .shive-card,.shive .shive-panel{margin:0 0 1.25rem;padding:1rem 1.25rem;border:1px solid var(--sh-line);border-radius:var(--sh-r);background:var(--sh-soft)}
+.shive .shive-panel{margin-top:1rem;border-top:3px solid var(--sh-accent)}
+.shive .shive-panel>h3:first-child{margin-top:0}
+.shive .shive-card-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:.4rem 1rem;margin-bottom:.5rem}
+.shive .shive-card-head h3{margin:0;font-size:1.15em}
+.shive .shive-card-head h3 .fa{color:var(--sh-accent);margin-right:.3rem}
+.shive .shive-savebar{display:flex;flex-wrap:wrap;align-items:center;gap:.75rem;margin-top:.5rem}
+
+/* ---- text helpers */
 .shive .shive-hint{opacity:.7;font-size:.9em}
-.shive .shive-star{cursor:pointer;font-size:1.2em;line-height:1;background:none;border:0;padding:0 .2em;color:var(--gray-400,#999)}
-.shive .shive-star.on{color:var(--orange,#f15a2c)}
-.shive .shive-star:hover{color:var(--orange,#f15a2c)}
+.shive .shive-err{color:var(--sh-err)}
+.shive .shive-ok{color:var(--sh-ok)}
+.shive .shive-warn{color:var(--sh-warn)}
+.shive .shive-mono{font-family:monospace;font-size:.9em}
+.shive .shive-dim{opacity:.55}
+.shive kbd{display:inline-block;padding:0 .3em;border:1px solid var(--sh-line);border-bottom-width:2px;border-radius:3px;font-size:.85em;font-family:inherit}
+.shive code{padding:0 .25em;border-radius:3px;background:var(--sh-soft2)}
+
+/* ---- badges & pills */
+.shive .shive-badge{display:inline-block;padding:.05rem .55rem;border-radius:999px;color:#fff;font-size:.78em;font-weight:600;letter-spacing:.02em;text-transform:uppercase;vertical-align:middle}
+.shive .shive-badge.success{background:var(--sh-ok)}.shive .shive-badge.warning{background:var(--sh-warn)}
+.shive .shive-badge.failed,.shive .shive-badge.crashed{background:var(--sh-err)}.shive .shive-badge.running{background:var(--sh-info)}
+.shive .shive-pill{display:inline-flex;align-items:center;gap:.35em;padding:0 .55em;border-radius:999px;font-size:.8em;line-height:1.7;white-space:nowrap;background:var(--sh-soft2)}
+.shive .shive-pill::before{content:"";width:.5em;height:.5em;border-radius:50%;background:currentColor;opacity:.9}
+.shive .shive-pill.ok{color:var(--sh-ok)}.shive .shive-pill.off{opacity:.75}.shive .shive-pill.err{color:var(--sh-err)}
+
+/* ---- tables */
+.shive .shive-table td,.shive .shive-table th{vertical-align:top}
+.shive .shive-table tbody tr:hover>td{background:var(--sh-soft)}
+.shive .shive-retention input{width:5rem}
+.shive .shive-crumbs{margin:.25rem 0 .5rem;padding:.3rem .6rem;border-radius:var(--sh-r);background:var(--sh-soft2);font-family:monospace}
+.shive .shive-crumbs a{cursor:pointer;text-decoration:underline}
+
+/* ---- snapshot star */
+.shive .shive-star{cursor:pointer;font-size:1.2em;line-height:1;background:none;border:0;padding:0 .2em;color:var(--gray-400,#999);transition:transform .12s}
+.shive .shive-star.on,.shive .shive-star:hover{color:var(--sh-accent)}
+.shive .shive-star:hover{transform:scale(1.2)}
+
 /* Keeps a button clickable regardless of ambient page-level styling/JS (Unraid's own Settings
    pages grey out a value="Apply" button until their change-tracker fires - we don't have one).
    Deliberately forces ONLY interactivity, never colours: the native webGUI button styling
    (outline at rest, filled on hover) must still apply so it matches every other button. */
 .shive .shive-force-btn{opacity:1!important;pointer-events:auto!important;cursor:pointer!important;filter:none!important}
+
+/* ---- form rows */
 .shive dd > .shive-row{display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;gap:.5rem;margin-bottom:.4rem}
 .shive .shive-row label{display:inline-flex;align-items:center;gap:.35rem;white-space:nowrap}
 .shive .shive-nowrap{display:inline-flex;align-items:center;gap:.15rem;flex-wrap:wrap}
 .shive dd > span > input[type=checkbox],.shive .shive-row input[type=checkbox]{margin:0}
-.shive .shive-err{color:var(--red-500,#d9534f)}
-.shive .shive-ok{color:var(--green-500,#5cb85c)}
-.shive .shive-warn{color:var(--orange-500,#f0ad4e)}
-.shive .shive-table td,.shive .shive-table th{vertical-align:top}
-.shive .shive-retention input{width:5rem}
-.shive .shive-crumbs a{cursor:pointer;text-decoration:underline}
-.shive .shive-log{max-height:60vh;overflow:auto;font-size:.85em;white-space:pre-wrap;padding:.5rem;background:var(--gray-100,#f4f4f4)}
-.shive .shive-mono{font-family:monospace;font-size:.9em}
-.shive .shive-hist{display:grid;grid-template-columns:repeat(auto-fill,minmax(20rem,1fr));gap:1rem;margin-bottom:1rem}
-.shive .shive-hist>div{padding:.75rem;border:1px solid var(--gray-300,#ccc);border-radius:4px}
-.shive .shive-hist h4{margin:0 0 .4rem 0}
-.shive .shive-badge{display:inline-block;padding:0 .4rem;border-radius:3px;color:#fff;font-size:.8em}
-.shive .shive-badge.success{background:var(--green-500,#5cb85c)}.shive .shive-badge.warning{background:var(--orange-500,#f0ad4e)}
-.shive .shive-badge.failed,.shive .shive-badge.crashed{background:var(--red-500,#d9534f)}.shive .shive-badge.running{background:var(--blue-500,#337ab7)}
-.shive .shive-dslist{max-height:16rem;overflow:auto;border:1px solid var(--gray-300,#ccc);border-radius:4px;padding:.3rem .5rem;min-width:24rem;margin:.3rem 0}
-.shive .shive-dslist label{display:block;font-family:monospace;font-size:.9em;white-space:nowrap;cursor:pointer}
+
+/* ---- logs & history */
+.shive .shive-log{max-height:60vh;overflow:auto;font-size:.85em;white-space:pre-wrap;padding:.75rem 1rem;border:1px solid var(--sh-line);border-radius:var(--sh-r);background:var(--sh-soft2)}
+.shive .shive-hist{display:grid;grid-template-columns:repeat(auto-fill,minmax(20rem,1fr));gap:1rem;margin-bottom:1.25rem}
+.shive .shive-hist>div{padding:.75rem 1rem;border:1px solid var(--sh-line);border-left:4px solid var(--sh-line);border-radius:var(--sh-r);background:var(--sh-soft)}
+.shive .shive-hist>div.st-success{border-left-color:var(--sh-ok)}.shive .shive-hist>div.st-warning{border-left-color:var(--sh-warn)}
+.shive .shive-hist>div.st-failed,.shive .shive-hist>div.st-crashed{border-left-color:var(--sh-err)}.shive .shive-hist>div.st-running{border-left-color:var(--sh-info)}
+.shive .shive-hist h4{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem;margin:0 0 .4rem 0}
+
+/* ---- dataset pickers */
+.shive .shive-dslist{max-height:16rem;overflow:auto;border:1px solid var(--sh-line);border-radius:var(--sh-r);padding:.3rem .5rem;min-width:24rem;margin:.3rem 0;background:var(--sh-soft)}
+.shive .shive-dslist label{display:block;font-family:monospace;font-size:.9em;white-space:nowrap;cursor:pointer;padding:.05rem .2rem;border-radius:3px}
+.shive .shive-dslist label:hover{background:var(--sh-soft2)}
 .shive .shive-dslist input{margin-right:.4rem}
 /* Exclusion checkboxes deliberately don't look like normal "select to include" checkboxes -
    checked here means "leave this out", so a native checkmark would read backwards. Shown as a
@@ -35,6 +75,45 @@
    The minus is a background SVG rather than ::after: pseudo-elements on <input> render only in
    some browsers, a background image on an appearance:none input renders in all of them. */
 .shive .shive-dslist input.shive-excl{appearance:none;-webkit-appearance:none;-moz-appearance:none;width:.95em;height:.95em;margin:0 .4rem 0 0;border:1px solid var(--gray-400,#999);border-radius:2px;vertical-align:-.12em;cursor:pointer;background:transparent no-repeat center/70% 70%}
-.shive .shive-dslist input.shive-excl:hover{border-color:var(--red-500,#d9534f)}
-.shive .shive-dslist input.shive-excl:focus-visible{outline:2px solid var(--red-500,#d9534f);outline-offset:1px}
-.shive .shive-dslist input.shive-excl:checked{background-color:var(--red-500,#d9534f);border-color:var(--red-500,#d9534f);background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Crect x='1.5' y='4.2' width='7' height='1.6' fill='%23fff'/%3E%3C/svg%3E")}
+.shive .shive-dslist input.shive-excl:hover{border-color:var(--sh-err)}
+.shive .shive-dslist input.shive-excl:focus-visible{outline:2px solid var(--sh-err);outline-offset:1px}
+.shive .shive-dslist input.shive-excl:checked{background-color:var(--sh-err);border-color:var(--sh-err);background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Crect x='1.5' y='4.2' width='7' height='1.6' fill='%23fff'/%3E%3C/svg%3E")}
+
+/* ---- containers: icons */
+.shive .shive-ctr-icon{flex:none;width:32px;height:32px;border-radius:6px;object-fit:contain;vertical-align:middle}
+.shive .shive-ctr-noicon{display:inline-flex;align-items:center;justify-content:center;background:var(--sh-soft2);font-size:16px;opacity:.7}
+.shive .shive-ctr-cell{display:inline-flex;align-items:center;gap:.6rem}
+
+/* ---- containers: start order (drag & drop) */
+.shive .shive-order{display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);gap:1.25rem;align-items:start}
+@media (max-width:1100px){.shive .shive-order{grid-template-columns:1fr}}
+.shive .shive-col-head{display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin-bottom:.4rem;font-weight:600}
+.shive .shive-col-head .fa{opacity:.7}
+.shive .shive-dnd{list-style:none;margin:0;padding:.4rem;min-height:3.4rem;border:1px dashed var(--sh-line);border-radius:var(--sh-r);background:var(--sh-soft)}
+.shive .shive-pool{max-height:34rem;overflow:auto}
+.shive .shive-dnd.is-empty::before{content:attr(data-empty);display:block;padding:.85rem;text-align:center;opacity:.6;font-size:.9em}
+.shive .shive-dnd .shive-loading{padding:.85rem;text-align:center}
+.shive .shive-ctr-item{display:flex;align-items:center;gap:.6rem;margin:0 0 .35rem;padding:.4rem .6rem;border:1px solid var(--sh-line);border-radius:var(--sh-r);background:var(--background-color,var(--sh-soft2));box-shadow:0 1px 2px rgba(0,0,0,.06);transition:box-shadow .15s,border-color .15s}
+.shive .shive-ctr-item:last-child{margin-bottom:0}
+.shive .shive-ctr-item:hover{border-color:rgba(128,128,128,.5)}
+.shive .shive-ctr-item:focus-visible{outline:2px solid var(--sh-accent);outline-offset:1px}
+.shive .shive-ctr-item.is-ignored{opacity:.5}
+.shive .shive-grip{flex:none;display:inline-flex;align-items:center;justify-content:center;width:1.6rem;height:2rem;margin-left:-.2rem;border-radius:4px;cursor:grab;opacity:.5;touch-action:none}
+.shive .shive-grip:hover{opacity:1;background:var(--sh-soft2)}
+.shive .shive-pos{flex:none;display:inline-flex;align-items:center;justify-content:center;min-width:1.6rem;height:1.6rem;padding:0 .25rem;box-sizing:border-box;border-radius:999px;background:var(--sh-accent);color:#fff;font-weight:700;font-size:.85em}
+.shive .shive-ctr-name{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;line-height:1.25}
+.shive .shive-ctr-name b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.shive .shive-ctr-name small{opacity:.65}
+.shive .shive-wait{flex:none;display:inline-flex;align-items:center;gap:.3rem;font-size:.85em;white-space:nowrap}
+.shive .shive-wait input{width:4.2rem;margin:0}
+.shive .shive-wait input:disabled{opacity:.45}
+.shive .shive-ctr-btns{flex:none;display:inline-flex;gap:.15rem}
+.shive .shive-ib{box-shadow:none;font-size:1em;letter-spacing:0;text-transform:none;line-height:1;display:inline-flex;align-items:center;justify-content:center;width:1.8rem;height:1.8rem;min-width:0;margin:0;padding:0;border:1px solid transparent;border-radius:4px;background:none;color:inherit;opacity:.6;cursor:pointer}
+.shive .shive-ib:hover{opacity:1;border-color:var(--sh-line);background:var(--sh-soft2)}
+/* the same <li> lives in both lists; which controls it shows depends on where it currently is */
+.shive .shive-pool .shive-pos,.shive .shive-pool .shive-wait,.shive .shive-pool .in-seq,.shive .shive-seq .in-pool{display:none}
+.shive .shive-ctr-item.shive-dragging{position:fixed;z-index:10000;margin:0;pointer-events:none;box-shadow:0 10px 28px rgba(0,0,0,.28);border-color:var(--sh-accent);transform:rotate(.6deg);opacity:.96}
+.shive .shive-ctr-ph{margin:0 0 .35rem;border:2px dashed var(--sh-accent);border-radius:var(--sh-r);background:rgba(241,90,44,.07)}
+.shive .shive-pool .shive-ctr-ph{height:2.9rem!important}
+body.shive-noselect,body.shive-noselect *{user-select:none!important;-webkit-user-select:none!important;cursor:grabbing!important}
+@media (max-width:640px){.shive .shive-seq .shive-ctr-item{flex-wrap:wrap}.shive .shive-ctr-name{flex-basis:8rem}.shive .shive-pool .shive-pill{display:none}}

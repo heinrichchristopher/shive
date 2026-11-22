@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build the Slackware-style package and set version + MD5 in shive.plg.
-#   ./build.sh [version]     (default: today, YYYY.MM.DD; same-day re-releases: YYYY.MM.DD.1, .2, ...)
+#   ./build.sh [version]     (default: today, YYYY.MM.DD; same-day re-releases: YYYY.MM.DDa, b, c, ...)
 #
 # Needs GNU/Linux tools (md5sum, GNU sed, xmllint, python3). On macOS run it in the pinned
 # container from README.md ("Releasing"). The package is uploaded to the GitHub release exactly as

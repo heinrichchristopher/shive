@@ -5,14 +5,32 @@ Markdown="false"
 ---
 <?php require_once '/usr/local/emhttp/plugins/shive/include/head.php'; ?>
 <div class="shive" id="shive-containers">
-  <p class="shive-hint">Auto-discovered from each container's bind mounts (<code>docker inspect</code> → <code>findmnt -T</code> → ZFS dataset). Override where discovery cannot resolve a path (e.g. paths through <code>/mnt/user</code> that do not exist on any pool) or tick <em>ignore</em> for containers that must never be stopped.</p>
-  <p class="shive-hint"><b>Start order</b> decides which container comes back up first after a snapshot - lowest number first (0 = unspecified, sorted by name among equals). Containers are <b>stopped in the exact reverse order</b>, since whatever starts last depends on what came before it. Example: <code>paperless-redis = 10</code>, <code>paperless-ngx = 20</code> starts redis first and stops the app first. <b>Wait after start</b> pauses that many seconds before starting the next container, for a dependency that needs a moment to become ready; it is skipped after the last container. Both apply to every schedule - a dependency is a property of the containers, not of one schedule.</p>
-  <div class="TableContainer">
-  <table class="tablesorter shift shive-table">
-    <thead><tr><th>Container</th><th>State</th><th>Discovered datasets</th><th>Bind mounts</th><th>Override datasets (comma separated)</th><th>Ignore</th><th>Start order</th><th>Wait after start (s)</th></tr></thead>
-    <tbody id="ctr-rows"><tr><td colspan="8">loading…</td></tr></tbody>
-  </table>
-  </div>
-  <p><span class="buttons-spaced"><input type="button" value="Save overrides" onclick="Shive.ctr.save()"> <input type="button" value="Rescan" onclick="Shive.ctr.load(true)"></span> <span id="ctr-msg" class="shive-hint"></span></p>
+  <section class="shive-card">
+    <header class="shive-card-head"><h3><i class="fa fa-sort-amount-asc"></i> Start order</h3><span class="shive-hint">applies to every schedule – a dependency is a property of the containers, not of one schedule</span></header>
+    <p class="shive-hint">Drag containers by their handle into the <b>sequence</b>: after a snapshot they come back up <b>top to bottom</b>, and before it they are stopped in the <b>exact reverse</b> (bottom first). Containers <b>not in the sequence</b> start before it, alphabetically. <b>Wait</b> pauses that many seconds before the next container starts, for a dependency that needs a moment to become ready; it is skipped after the last one. Keyboard: focus a row and use <kbd>Alt</kbd>+<kbd>↑</kbd>/<kbd>↓</kbd>.</p>
+    <div class="shive-order">
+      <div class="shive-order-col">
+        <div class="shive-col-head"><span><i class="fa fa-list-ol"></i> Sequence</span><span class="shive-hint"><i class="fa fa-arrow-down"></i> start · <i class="fa fa-arrow-up"></i> stop</span></div>
+        <ol id="ctr-seq" class="shive-dnd shive-seq" data-empty="Drag containers here to give them a fixed position"><li class="shive-hint shive-loading">loading…</li></ol>
+      </div>
+      <div class="shive-order-col">
+        <div class="shive-col-head"><span><i class="fa fa-random"></i> Not in sequence</span><span class="shive-hint">start first, A–Z</span></div>
+        <ul id="ctr-pool" class="shive-dnd shive-pool" data-empty="Every container has a position"></ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="shive-card">
+    <header class="shive-card-head"><h3><i class="fa fa-database"></i> Datasets</h3><span class="shive-hint">which containers a schedule stops</span></header>
+    <p class="shive-hint">Auto-discovered from each container's bind mounts (<code>docker inspect</code> → <code>findmnt -T</code> → ZFS dataset). Override where discovery cannot resolve a path (e.g. paths through <code>/mnt/user</code> that do not exist on any pool) or tick <em>ignore</em> for containers that must never be stopped.</p>
+    <div class="TableContainer">
+    <table class="tablesorter shift shive-table">
+      <thead><tr><th>Container</th><th>Discovered datasets</th><th>Bind mounts</th><th>Override datasets (comma separated)</th><th>Ignore</th></tr></thead>
+      <tbody id="ctr-rows"><tr><td colspan="5">loading…</td></tr></tbody>
+    </table>
+    </div>
+  </section>
+
+  <div class="shive-savebar"><span class="buttons-spaced"><input type="button" value="Save" onclick="Shive.ctr.save()"> <input type="button" value="Rescan" onclick="Shive.ctr.load(true)"></span> <span id="ctr-msg" class="shive-hint"></span></div>
 </div>
 <script>$(function(){ Shive.ctr.load(false); });</script>

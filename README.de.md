@@ -170,11 +170,13 @@ sich auf „ignore" setzen.
 
 Ohne Docker-Awareness läuft der Snapshot direkt durch – Container werden nicht angefasst.
 
-**Startreihenfolge und Wartezeit.** Im Containers-Tab bekommt jeder Container eine
-*Startreihenfolge* und optional eine *Wartezeit nach dem Start*. Gestartet wird aufsteigend
-(0 = ohne Angabe, bei Gleichstand nach Namen), **gestoppt wird in exakt umgekehrter Reihenfolge** –
-was zuletzt startet, hängt von dem ab, was vorher lief: `paperless-redis = 10`,
-`paperless-ngx = 20` startet Redis zuerst und stoppt die App zuerst. Die Wartezeit pausiert
+**Startreihenfolge und Wartezeit.** Der Containers-Tab zeigt jeden Container mit seinem
+Unraid-Icon in zwei Listen: der **Reihenfolge**, sortiert per Drag & Drop (oder Pfeil-Buttons bzw.
+<kbd>Alt</kbd>+<kbd>↑</kbd>/<kbd>↓</kbd>), und den Containern **ohne feste Position**. Gestartet wird
+von oben nach unten – Container ohne Position zuerst, alphabetisch –, **gestoppt wird in exakt
+umgekehrter Reihenfolge**: was zuletzt startet, hängt von dem ab, was vorher lief.
+`paperless-redis` über `paperless-ngx` startet Redis zuerst und stoppt die App zuerst. In
+`mappings.json` steht die Position als `order` (10, 20, 30, …). Die Wartezeit pausiert
 entsprechend viele Sekunden, bevor der nächste Container startet (für Abhängigkeiten, die kurz
 brauchen, bis sie bereit sind); nach dem letzten Container entfällt sie. Beides hängt am Container,
 gilt also für jeden Zeitplan, in dem er vorkommt.

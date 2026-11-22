@@ -49,11 +49,11 @@ var Shive = (function () {
           $('#sched-rows').html(schedules.map(function (s) {
             var x = byId[s.id] || {}, l = x.last, last = x.running ? badge('running') + ' ' + esc(x.running.phase) : (l ? badge(l.status) + ' ' + esc(fmtIso(l.finished)) : '–');
             if (x.messages && x.messages.length) last += '<br><span class="shive-hint">' + esc(x.messages.join(' · ')) + '</span>';
-            return '<tr' + (s.enabled ? '' : ' style="opacity:.5"') + '><td><b>' + esc(s.name) + '</b> <span class="shive-mono shive-hint">#' + esc(s.id) + '</span>' + (s.enabled ? '' : '<br><span class="shive-hint">disabled</span>') + '</td>' +
+            return '<tr' + (s.enabled ? '' : ' class="shive-dim"') + '><td><b>' + esc(s.name) + '</b> <span class="shive-mono shive-hint">#' + esc(s.id) + '</span>' + (s.enabled ? '' : '<br><span class="shive-hint">disabled</span>') + '</td>' +
               '<td class="shive-mono">' + esc(s.tag_prefix) + '…</td>' +
               '<td class="shive-mono">' + s.datasets.map(esc).join('<br>') + (s.recursive ? '<br><span class="shive-hint">+children</span>' : '') + '</td>' +
               '<td>' + esc(s.frequency) + '<br><span class="shive-mono shive-hint">' + esc(s.cron_expr) + '</span></td>' +
-              '<td>' + (s.docker_aware ? 'yes' : 'no') + '</td>' +
+              '<td>' + (s.docker_aware ? '<span class="shive-pill ok">yes</span>' : '<span class="shive-pill off">no</span>') + '</td>' +
               '<td class="shive-mono">' + (s.local_target.enabled ? esc(s.local_target.dataset) + tgtSched(s.local_target) : '–') + '</td>' +
               '<td class="shive-mono">' + (s.remote_target.enabled ? esc(s.remote_target.host + ':' + s.remote_target.dataset) + tgtSched(s.remote_target) : '–') + '</td>' +
               '<td>' + last + '</td>' +
@@ -252,37 +252,171 @@ var Shive = (function () {
   };
 
   /* ------------------------------------------------------------ containers */
+  // The start order is still stored as the per-container integer "order" in mappings.json (the
+  // runner sorts by it, unordered = 0 starts first). The GUI just presents it as a list: position
+  // i in the sequence is saved as (i+1)*step, the pool as "no order". Pointer events instead of
+  // HTML5 drag&drop, because the latter does nothing on touch screens.
   var ctr = {
+    data: null, ov: {}, dirty: false, drag: null,
     load: function (refresh) {
-      $('#ctr-msg').text(refresh ? 'scanning…' : '');
+      if (refresh && ctr.dirty && !window.confirm('Discard unsaved changes and rescan?')) return;
+      $('#ctr-msg').removeClass('shive-warn').text(refresh ? 'scanning…' : '');
       get('containers', { refresh: refresh ? 1 : 0 }).then(function (r) {
         get('mappings').then(function (m) {
-          var ov = m.mappings || {};
-          var rows = Object.keys(r.containers).map(function (n) {
-            var c = r.containers[n], o = ov[n] || {};
-            return '<tr><td><b>' + esc(n) + '</b>' + (c.missing ? ' <span class="shive-err">(not found)</span>' : '') + '</td><td>' + (c.running ? 'running' : 'stopped') + '</td>' +
-              '<td class="shive-mono">' + (c.override === 'ignore' ? '<i>ignored</i>' : c.datasets.map(esc).join('<br>') || '<span class="shive-err">unresolved</span>') + '</td>' +
-              '<td class="shive-mono shive-hint">' + c.mounts.map(esc).join('<br>') + '</td>' +
-              '<td><input type="text" class="ov-ds" data-name="' + esc(n) + '" value="' + esc((o.datasets || []).join(',')) + '" style="width:100%"></td>' +
-              '<td><input type="checkbox" class="ov-ignore" data-name="' + esc(n) + '"' + (o.ignore ? ' checked' : '') + '></td>' +
-              '<td><input type="number" class="ov-order" data-name="' + esc(n) + '" value="' + (o.order || 0) + '" min="0" max="999" style="width:5rem"></td>' +
-              '<td><input type="number" class="ov-wait" data-name="' + esc(n) + '" value="' + (o.wait || 0) + '" min="0" max="600" style="width:5rem"></td></tr>';
-          });
-          $('#ctr-rows').html(rows.join('') || '<tr><td colspan="8">no containers</td></tr>');
+          ctr.data = r; ctr.ov = m.mappings || {};
+          ctr.renderMap(); ctr.renderOrder(); ctr.setDirty(false);
           $('#ctr-msg').text('scanned ' + new Date(r.updated * 1000).toLocaleTimeString());
         });
       });
+      if (!ctr._bound) {
+        ctr._bound = true;
+        $(window).on('beforeunload', function () { if (ctr.dirty) return 'Unsaved start order / dataset changes'; });
+        $('#shive-containers').on('input change', '.ov-ds, .ov-ignore, .ov-wait', function () {
+          if ($(this).hasClass('ov-ignore')) ctr.item(this.getAttribute('data-name')).toggleClass('is-ignored', this.checked);
+          ctr.setDirty(true);
+        }).on('pointerdown', '.shive-grip', ctr.dragStart)
+          .on('keydown', '.shive-ctr-item', ctr.key);
+      }
+    },
+    names: function () { return Object.keys(ctr.data.containers); },
+    item: function (n) { return $('#ctr-seq, #ctr-pool').children('.shive-ctr-item').filter(function () { return this.getAttribute('data-name') === n; }); },
+    icon: function (c) {
+      var fb = '<span class="shive-ctr-icon shive-ctr-noicon"><i class="fa fa-cube"></i></span>';
+      if (!c.icon) return fb;
+      return '<img class="shive-ctr-icon" alt="" loading="lazy" src="' + API + '?op=icon&name=' + encodeURIComponent(c.name) + '&v=' + ctr.data.updated +
+             '" onerror="this.outerHTML=\'' + fb.replace(/"/g, '&quot;') + '\'">';
+    },
+    state: function (c) {
+      return c.missing ? '<span class="shive-pill err">not found</span>' : '<span class="shive-pill ' + (c.running ? 'ok' : 'off') + '">' + (c.running ? 'running' : 'stopped') + '</span>';
+    },
+    renderMap: function () {
+      var rows = ctr.names().map(function (n) {
+        var c = ctr.data.containers[n], o = ctr.ov[n] || {};
+        return '<tr' + (c.override === 'ignore' ? ' class="shive-dim"' : '') + '><td><span class="shive-ctr-cell">' + ctr.icon(c) + '<span><b>' + esc(n) + '</b><br>' + ctr.state(c) + '</span></span></td>' +
+          '<td class="shive-mono">' + (c.override === 'ignore' ? '<i>ignored</i>' : c.datasets.map(esc).join('<br>') || '<span class="shive-err">unresolved</span>') +
+            (c.override === 'manual' ? '<br><span class="shive-hint">(override)</span>' : '') + '</td>' +
+          '<td class="shive-mono shive-hint">' + c.mounts.map(esc).join('<br>') + '</td>' +
+          '<td><input type="text" class="ov-ds" data-name="' + esc(n) + '" value="' + esc((o.datasets || []).join(',')) + '" style="width:100%"></td>' +
+          '<td><input type="checkbox" class="ov-ignore" data-name="' + esc(n) + '"' + (o.ignore ? ' checked' : '') + '></td></tr>';
+      });
+      $('#ctr-rows').html(rows.join('') || '<tr><td colspan="5">no containers</td></tr>');
+    },
+    itemHtml: function (c) {
+      var o = ctr.ov[c.name] || {}, n = esc(c.name);
+      var info = c.override === 'ignore' ? 'ignored – never stopped' : (c.datasets.length ? c.datasets.length + ' dataset' + (c.datasets.length > 1 ? 's' : '') : 'no datasets');
+      return '<li class="shive-ctr-item' + (o.ignore ? ' is-ignored' : '') + '" data-name="' + n + '" tabindex="0">' +
+        '<span class="shive-grip" title="Drag to move"><i class="fa fa-bars"></i></span>' +
+        '<span class="shive-pos"></span>' + ctr.icon(c) +
+        '<span class="shive-ctr-name"><b>' + n + '</b><small>' + esc(info) + '</small></span>' + ctr.state(c) +
+        '<label class="shive-wait" title="Seconds to wait before the next container starts">wait <input type="number" class="ov-wait" data-name="' + n + '" min="0" max="600" value="' + (o.wait || 0) + '"> s</label>' +
+        '<span class="shive-ctr-btns">' +
+          '<button type="button" class="shive-ib in-seq" title="Move up" onclick="Shive.ctr.move(this,-1)"><i class="fa fa-chevron-up"></i></button>' +
+          '<button type="button" class="shive-ib in-seq" title="Move down" onclick="Shive.ctr.move(this,1)"><i class="fa fa-chevron-down"></i></button>' +
+          '<button type="button" class="shive-ib in-seq" title="Remove from sequence" onclick="Shive.ctr.toPool(this)"><i class="fa fa-times"></i></button>' +
+          '<button type="button" class="shive-ib in-pool" title="Append to sequence" onclick="Shive.ctr.toSeq(this)"><i class="fa fa-plus"></i></button>' +
+        '</span></li>';
+    },
+    renderOrder: function () {
+      var all = ctr.names().map(function (n) { return ctr.data.containers[n]; }).filter(function (c) { return !c.missing; });
+      var ord = function (c) { return (ctr.ov[c.name] || {}).order || 0; };
+      // same sort the runner uses: by order, ties keep name order (discovery is name-sorted)
+      var seq = all.filter(function (c) { return ord(c) > 0; }).sort(function (a, b) { return ord(a) - ord(b) || (a.name < b.name ? -1 : 1); });
+      $('#ctr-seq').html(seq.map(ctr.itemHtml).join(''));
+      $('#ctr-pool').html(all.filter(function (c) { return ord(c) === 0; }).map(ctr.itemHtml).join(''));
+      ctr.renumber();
+    },
+    sortPool: function () {
+      var p = $('#ctr-pool');
+      p.children('.shive-ctr-item').sort(function (a, b) { return a.getAttribute('data-name') < b.getAttribute('data-name') ? -1 : 1; }).appendTo(p);
+    },
+    renumber: function () {
+      var items = $('#ctr-seq').children('.shive-ctr-item');
+      items.each(function (i) {
+        $(this).find('.shive-pos').text(i + 1);
+        $(this).find('.ov-wait').prop('disabled', i === items.length - 1)
+          .attr('title', i === items.length - 1 ? 'skipped after the last container' : '');
+      });
+      $('#ctr-pool .ov-wait').prop('disabled', false).attr('title', '');
+      ctr.emptyState();
+    },
+    emptyState: function () {
+      $('#ctr-seq, #ctr-pool').each(function () { $(this).toggleClass('is-empty', !$(this).children('.shive-ctr-item:not(.shive-dragging), .shive-ctr-ph').length); });
+    },
+    setDirty: function (d) {
+      ctr.dirty = d;
+      if (d) $('#ctr-msg').addClass('shive-warn').text('unsaved changes');
+    },
+    moved: function (li) { ctr.sortPool(); ctr.renumber(); ctr.setDirty(true); if (li) li.focus(); },
+    move: function (btn, dir) {
+      var li = $(btn).closest('.shive-ctr-item'), to = dir < 0 ? li.prev('.shive-ctr-item') : li.next('.shive-ctr-item');
+      if (!to.length) return;
+      if (dir < 0) li.insertBefore(to); else li.insertAfter(to);
+      ctr.moved(li[0]);
+    },
+    toPool: function (btn) { var li = $(btn).closest('.shive-ctr-item').appendTo('#ctr-pool'); ctr.moved(li[0]); },
+    toSeq: function (btn) { var li = $(btn).closest('.shive-ctr-item').appendTo('#ctr-seq'); ctr.moved(li[0]); },
+    key: function (e) {
+      if (e.target !== this || !e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+      e.preventDefault();
+      if ($(this).parent().is('#ctr-pool')) { if (e.key === 'ArrowUp') ctr.toSeq(this); return; }
+      ctr.move(this, e.key === 'ArrowUp' ? -1 : 1);
+    },
+    dragStart: function (e) {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      var li = $(this).closest('.shive-ctr-item')[0], r = li.getBoundingClientRect();
+      e.preventDefault();
+      var ph = document.createElement('li'); ph.className = 'shive-ctr-ph'; ph.style.height = r.height + 'px';
+      li.parentNode.insertBefore(ph, li);
+      ctr.drag = { li: li, ph: ph, from: li.parentNode, idx: $(li).index(), dx: e.clientX - r.left, dy: e.clientY - r.top, x: e.clientX, y: e.clientY };
+      $(li).addClass('shive-dragging').css({ width: r.width, left: r.left, top: r.top });
+      $('body').addClass('shive-noselect');
+      $(document).on('pointermove.shivedrag', ctr.dragMove).on('pointerup.shivedrag pointercancel.shivedrag', ctr.dragEnd);
+      // keep scrolling while the pointer rests near the window edge (long lists on small screens)
+      ctr.drag.timer = setInterval(function () {
+        var d = ctr.drag, edge = 60, v = d.y < edge ? d.y - edge : (d.y > window.innerHeight - edge ? d.y - window.innerHeight + edge : 0);
+        if (v) { window.scrollBy(0, v / 3); ctr.place(); }
+      }, 16);
+      ctr.emptyState();
+    },
+    dragMove: function (e) {
+      var d = ctr.drag; d.x = e.clientX; d.y = e.clientY;
+      d.li.style.left = (d.x - d.dx) + 'px'; d.li.style.top = (d.y - d.dy) + 'px';
+      ctr.place();
+    },
+    place: function () {
+      var d = ctr.drag, x = d.x, y = d.y, seq = $('#ctr-seq')[0], pool = $('#ctr-pool')[0];
+      var hit = function (el, pad) { var r = el.getBoundingClientRect(); return x >= r.left - pad && x <= r.right + pad && y >= r.top - pad && y <= r.bottom + pad; };
+      var list = hit(pool, 12) ? pool : hit(seq, 48) ? seq : d.ph.parentNode;
+      var kids = $(list).children('.shive-ctr-item').not(d.li).get(), before = null;
+      if (list === seq) for (var i = 0; i < kids.length; i++) { var r = kids[i].getBoundingClientRect(); if (y < r.top + r.height / 2) { before = kids[i]; break; } }
+      // the pool is always alphabetical, so where in it the item lands doesn't matter
+      if (before) { if (d.ph.nextSibling !== before) list.insertBefore(d.ph, before); }
+      else if (d.ph.parentNode !== list || $(d.ph).nextAll('.shive-ctr-item').not(d.li).length) list.appendChild(d.ph);
+      ctr.emptyState();
+    },
+    dragEnd: function () {
+      var d = ctr.drag; if (!d) return;
+      clearInterval(d.timer); $(document).off('.shivedrag'); $('body').removeClass('shive-noselect');
+      d.ph.parentNode.insertBefore(d.li, d.ph); $(d.ph).remove();
+      $(d.li).removeClass('shive-dragging').css({ width: '', left: '', top: '' });
+      ctr.drag = null;
+      if (d.li.parentNode !== d.from || $(d.li).index() !== d.idx) ctr.moved(d.li); else ctr.renumber();
     },
     save: function () {
-      var m = {};
-      $('.ov-ds').each(function () { var v = $(this).val().split(',').map($.trim).filter(Boolean); if (v.length) m[$(this).data('name')] = { datasets: v }; });
-      $('.ov-ignore:checked').each(function () { m[$(this).data('name')] = $.extend(m[$(this).data('name')] || {}, { ignore: true }); });
-      // only store a non-default order/wait, so mappings.json stays a list of actual overrides
-      $('.ov-order, .ov-wait').each(function () {
-        var v = parseInt($(this).val(), 10), n = $(this).data('name'), k = $(this).hasClass('ov-order') ? 'order' : 'wait';
-        if (v > 0) { m[n] = m[n] || {}; m[n][k] = v; }
+      var m = {}, set = function (n, k, v) { if (v && !(Array.isArray(v) && !v.length)) { m[n] = m[n] || {}; m[n][k] = v; } };
+      $('.ov-ds').each(function () { set(this.getAttribute('data-name'), 'datasets', $(this).val().split(',').map($.trim).filter(Boolean)); });
+      $('.ov-ignore:checked').each(function () { set(this.getAttribute('data-name'), 'ignore', true); });
+      var seq = $('#ctr-seq').children('.shive-ctr-item'), step = seq.length * 10 <= 999 ? 10 : 1, shown = {};
+      // gaps of 10 keep mappings.json readable and hand-editable ("put x between 20 and 30")
+      seq.each(function (i) { set(this.getAttribute('data-name'), 'order', (i + 1) * step); });
+      $('#ctr-seq, #ctr-pool').children('.shive-ctr-item').each(function () {
+        var n = this.getAttribute('data-name'); shown[n] = true;
+        set(n, 'wait', parseInt($(this).find('.ov-wait').val(), 10) || 0);
       });
-      post('mappings_save', { mappings: JSON.stringify(m) }).done(function () { toast('Overrides saved.'); ctr.load(true); });
+      // a container that is gone right now (not in either list) keeps the position it had
+      $.each(ctr.ov, function (n, o) { if (!shown[n]) { set(n, 'order', o.order || 0); set(n, 'wait', o.wait || 0); } });
+      post('mappings_save', { mappings: JSON.stringify(m) }).done(function () { ctr.dirty = false; toast('Containers saved.'); ctr.load(true); })
+        .fail(function (x) { toast((x.responseJSON || {}).error || 'save failed', false); });
     }
   };
 
@@ -411,7 +545,7 @@ var Shive = (function () {
         var h = '<div class="shive-hist">';
         $.each(r.history, function (id, x) {
           var l = x.last;
-          h += '<div><h4>' + esc(x.name || id) + ' <span class="shive-mono shive-hint">#' + esc(id) + '</span> ' + (x.running ? badge('running') + ' ' + esc(x.running.phase) : (l ? badge(l.status) : '')) + '</h4>';
+          h += '<div class="st-' + esc(x.running ? 'running' : (l ? l.status : 'never')) + '"><h4>' + esc(x.name || id) + ' <span class="shive-mono shive-hint">#' + esc(id) + '</span> ' + (x.running ? badge('running') + ' ' + esc(x.running.phase) : (l ? badge(l.status) : '')) + '</h4>';
           if (l) {
             h += '<div class="shive-hint">finished ' + esc(fmtIso(l.finished)) + '</div><div class="shive-mono">' + esc(l.snapshot || '–') + '</div>';
             $.each(l.sends || {}, function (k, v) { h += '<div>' + esc(k) + ': ' + esc(v.status) + (v.finished ? ' ' + esc(fmtIso(v.finished)) : v.reason ? ' (' + esc(v.reason) + ')' : '') + '</div>'; });

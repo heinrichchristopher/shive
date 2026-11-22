@@ -45,7 +45,7 @@ xattrs); wall-clock-dependent checks can flake under load - re-run before assumi
 New features and bug fixes get a permanent check in `run.sh`. `test/apitest.php GET|POST
 'op=...&k=v' [nocsrf]` drives `include/api.php` directly.
 
-Build: `./build.sh [YYYY.MM.DD[.N]]` needs GNU tools (`md5sum`, GNU sed, xmllint, python3), so on
+Build: `./build.sh [YYYY.MM.DD[a|b|c…]]` (same-day re-releases get a letter suffix) needs GNU tools (`md5sum`, GNU sed, xmllint, python3), so on
 macOS run it in the pinned `python:3.12-slim@sha256:…` container shown in README.md "Releasing".
 It builds a deterministic `build/shive-<ver>-noarch-1.txz`, patches `version`/`pkgMD5` into
 `shive.plg`, and writes `build/local/shive.plg` for a `file://` test install. Releases are built
